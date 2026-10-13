@@ -56,10 +56,11 @@ MODELS_PATH = HOME_PATH + "/Downloads/src/ComfyUI/models"
 LLM_PATH = "/win/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS"
 
 # Default paths for sd-cli models
-DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/boogu-edit-dit-Q4_0.gguf"
+DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf"
 DEFAULT_LLM = LLM_PATH + "/Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf"
 DEFAULT_LLM_VISION = LLM_PATH + "/mmproj-F16.gguf"
-DEFAULT_VAE = MODELS_PATH + "/vae/ae.safetensors"
+DEFAULT_VAE = MODELS_PATH + "/vae/qwen_image_2.1_vae_bf16.safetensors"
+DEFAULT_SIGMAS = "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
 
 # Config presets directory
 CONFIG_DIR = os.path.join(os.environ.get('HOME'), '.config', 'gimp-plugins', 'aiedit')
@@ -100,6 +101,38 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
 
         row = 0
 
+        # Built-in preset shown first in the dropdown. Selecting it restores
+        # the script-defined defaults for every field (including sigmas).
+        DEFAULT_PRESET_NAME = _("Default")
+
+        def build_default_preset():
+            default_model = os.path.basename(DEFAULT_DIFFUSION_MODEL).lower()
+            if "boogu" in default_model or "kontext" in default_model:
+                default_mode = "kontext"
+            else:
+                default_mode = "img2img"
+            return {
+                "diffusion-model": DEFAULT_DIFFUSION_MODEL,
+                "clip-l": "",
+                "llm": DEFAULT_LLM,
+                "llm-vision": DEFAULT_LLM_VISION,
+                "vae": DEFAULT_VAE,
+                "t5xxl": "",
+                "t5": "",
+                "lora": "",
+                "control-net": "",
+                "steps": 8,
+                "cfg-scale": 1.0,
+                "guidance": 3.5,
+                "sigmas": DEFAULT_SIGMAS,
+                "vae-format": "auto",
+                "prediction": "",
+                "edit-mode": default_mode,
+                "seed": -1,
+                "strength": 0.75,
+                "prompt": "",
+            }
+
         # --- Preset management row ---
         preset_label = Gtk.Label.new_with_mnemonic(_("_Preset:"))
         preset_label.set_halign(Gtk.Align.START)
@@ -110,11 +143,12 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         preset_combo.set_valign(Gtk.Align.CENTER)
         preset_label.set_mnemonic_widget(preset_combo)
 
-        preset_names = get_preset_names()
-        for name in preset_names:
+        preset_combo.append_text(DEFAULT_PRESET_NAME)
+        for name in get_preset_names():
+            if name == DEFAULT_PRESET_NAME:
+                continue
             preset_combo.append_text(name)
-        if preset_names:
-            preset_combo.set_active(0)
+        preset_combo.set_active(0)
 
         save_btn = Gtk.Button.new_with_mnemonic(_("_Save"))
         save_btn.set_tooltip_text(_("Save current settings as a named preset"))
@@ -221,12 +255,14 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                      _("Path to a LoRA adapter file to apply (optional)"))
         add_file_row(_("Control-_Net:"), "control-net", "",
                      _("Path to a ControlNet model for guided generation (optional)"))
-        add_spin_row(_("_Steps:"), "steps", 28, 1, 100,
+        add_spin_row(_("_Steps:"), "steps", 8, 1, 100,
                      _("Number of sampling steps — higher values improve quality but take longer"))
-        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 4.0, 0.0, 30.0,
+        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 1.0, 0.0, 30.0,
                            _("How strongly to follow the prompt (1=creative, ~30=strict)"))
         add_spin_row_float(_("G_uida_nce:"), "guidance", 3.5, 0.0, 30.0,
                            _("Distilled guidance for flow-matching models like Flux (0=disabled)"))
+        add_file_row(_("Sig_mas:"), "sigmas", DEFAULT_SIGMAS,
+                     _("Custom sigma schedule (comma-separated values from 1.0 to 0.0) for distilled/turbo models — leave empty to use the model default"))
         add_file_row(_("VAE _Format:"), "vae-format", "auto",
                      _("VAE latent format: auto, flux, sd3, flux2, wan"))
         add_file_row(_("_Prediction:"), "prediction", "",
@@ -308,8 +344,11 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         # --- Preset callbacks ---
 
         def load_preset_values(preset_name):
-            presets = load_presets()
-            preset = presets.get(preset_name, {})
+            if preset_name == DEFAULT_PRESET_NAME:
+                preset = build_default_preset()
+            else:
+                presets = load_presets()
+                preset = presets.get(preset_name, {})
             for key, value in preset.items():
                 # Set config property with correct type
                 prop = procedure.find_property(key)
@@ -419,23 +458,25 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             if response != Gtk.ResponseType.OK or not name:
                 return
 
+            if name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("'%s' is a built-in preset and cannot be overwritten.") % name)
+                return
+
             presets = load_presets()
             presets[name] = values
             save_presets(presets)
 
-            # Update combo
+            # Update combo and select the saved preset
+            model = preset_combo.get_model()
             found = False
-            for i in range(preset_combo.get_model().iter_n_children(None)):
-                if preset_combo.get_active_text() == name:
+            for i in range(model.iter_n_children(None)):
+                if model.get_value(model.get_iter(i), 0) == name:
+                    preset_combo.set_active(i)
                     found = True
                     break
             if not found:
                 preset_combo.append_text(name)
-            preset_combo.set_active(-1)
-            for i in range(preset_combo.get_model().iter_n_children(None)):
-                if preset_combo.get_model().get_value(preset_combo.get_model().get_iter(i), 0) == name:
-                    preset_combo.set_active(i)
-                    break
+                preset_combo.set_active(model.iter_n_children(None) - 1)
 
         def on_rename_preset(btn):
             active = preset_combo.get_active()
@@ -443,6 +484,9 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 return
             old_name = preset_combo.get_active_text()
             if not old_name:
+                return
+            if old_name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("The built-in '%s' preset cannot be renamed.") % old_name)
                 return
 
             name_dialog = Gtk.Dialog(title=_("Rename Preset"), transient_for=dialog,
@@ -468,6 +512,9 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
 
             if response != Gtk.ResponseType.OK or not new_name or new_name == old_name:
                 return
+            if new_name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("'%s' is reserved for the built-in preset.") % new_name)
+                return
 
             presets = load_presets()
             presets[new_name] = presets.pop(old_name)
@@ -486,6 +533,9 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 return
             name = preset_combo.get_active_text()
             if not name:
+                return
+            if name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("The built-in '%s' preset cannot be deleted.") % name)
                 return
 
             confirm = Gtk.MessageDialog(transient_for=dialog, modal=True,
@@ -587,6 +637,8 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             guidance = config.get_property("guidance")
             if guidance:
                 command.extend(["--guidance", str(guidance)])
+            # Custom sigma schedule for distilled/turbo models
+            add_flag("--sigmas", config.get_property("sigmas"))
             # VAE format override
             add_flag("--vae-format", config.get_property("vae-format"))
             # Prediction type override
@@ -759,17 +811,22 @@ class AIEdit(Gimp.PlugIn):
         # Steps
         procedure.add_int_argument(
             "steps", _("_Steps"), _("Number of sampling steps"),
-            1, 100, 28, GObject.ParamFlags.READWRITE,
+            1, 100, 8, GObject.ParamFlags.READWRITE,
         )
         # CFG scale
         procedure.add_double_argument(
             "cfg-scale", _("CFG S_cale"), _("Classifier-free guidance scale"),
-            0.0, 30.0, 4.0, GObject.ParamFlags.READWRITE,
+            0.0, 30.0, 1.0, GObject.ParamFlags.READWRITE,
         )
         # Guidance (distilled, for flow-matching models)
         procedure.add_double_argument(
             "guidance", _("G_uida_nce"), _("Distilled guidance scale for flow-matching models (0=disabled)"),
             0.0, 30.0, 0.0, GObject.ParamFlags.READWRITE,
+        )
+        # Custom sigma schedule (distilled/turbo models)
+        procedure.add_string_argument(
+            "sigmas", _("Sig_mas"), _("Custom sigma schedule (comma-separated values from 1.0 to 0.0)"),
+            DEFAULT_SIGMAS, GObject.ParamFlags.READWRITE,
         )
         # VAE format override
         procedure.add_string_argument(
