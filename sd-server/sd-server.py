@@ -425,6 +425,11 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
         dialog.show_all()
         response = dialog.run()
         dialog.destroy()
+        # gtk_widget_destroy() only queues the teardown; flush it so the dead
+        # window does not linger (as "not responding") while the server runs.
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.flush()
 
         if response != Gtk.ResponseType.OK:
             return procedure.new_return_values(

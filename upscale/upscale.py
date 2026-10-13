@@ -184,7 +184,14 @@ def upscale_func(procedure, run_mode, image, drawables, config, data):
         GimpUi.init(PLUGIN_NAME)
         dialog = GimpUi.ProcedureDialog.new(procedure, config, _("Upscale Image"))
         dialog.fill(None)
-        if not dialog.run():
+        response = dialog.run()
+        # gimp_procedure_dialog_run() leaves the window mapped; tear it down and
+        # flush so it does not linger (as "not responding") while upscaling runs.
+        display = dialog.get_display()
+        dialog.destroy()
+        if display is not None:
+            display.flush()
+        if not response:
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
 
     Gimp.context_push()

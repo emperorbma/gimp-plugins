@@ -62,6 +62,27 @@ DEFAULT_LLM_VISION = LLM_PATH + "/mmproj-F16.gguf"
 DEFAULT_VAE = MODELS_PATH + "/vae/qwen_image_2.1_vae_bf16.safetensors"
 DEFAULT_SIGMAS = "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
 
+# Model filename hints for reference-image editing. These models consume the
+# source image through sd-cli's -r flag (together with the vision LLM) instead
+# of the classic --init-img img2img path.
+REFERENCE_EDIT_HINTS = ("boogu", "kontext", "qwen", "longcat", "mage", "edit")
+
+
+def uses_reference_image(model_path):
+    name = os.path.basename(model_path or "").lower()
+    return any(hint in name for hint in REFERENCE_EDIT_HINTS)
+
+
+# Edit models that additionally require the Qwen3-VL vision projector (mmproj)
+# passed via --llm_vision. Without it sd-cli disables vision and refuses to edit.
+VISION_EDIT_HINTS = ("qwen", "boogu", "longcat", "mage")
+
+
+def needs_vision_weights(model_path):
+    name = os.path.basename(model_path or "").lower()
+    return any(hint in name for hint in VISION_EDIT_HINTS)
+
+
 # Config presets directory
 CONFIG_DIR = os.path.join(os.environ.get('HOME'), '.config', 'gimp-plugins', 'aiedit')
 PRESETS_FILE = os.path.join(CONFIG_DIR, 'presets.json')
@@ -106,8 +127,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         DEFAULT_PRESET_NAME = _("Default")
 
         def build_default_preset():
-            default_model = os.path.basename(DEFAULT_DIFFUSION_MODEL).lower()
-            if "boogu" in default_model or "kontext" in default_model:
+            if uses_reference_image(DEFAULT_DIFFUSION_MODEL):
                 default_mode = "kontext"
             else:
                 default_mode = "img2img"
@@ -123,7 +143,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 "control-net": "",
                 "steps": 8,
                 "cfg-scale": 1.0,
-                "guidance": 3.5,
+                "guidance": 0.0,
                 "sigmas": DEFAULT_SIGMAS,
                 "vae-format": "auto",
                 "prediction": "",
@@ -259,7 +279,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                      _("Number of sampling steps — higher values improve quality but take longer"))
         add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 1.0, 0.0, 30.0,
                            _("How strongly to follow the prompt (1=creative, ~30=strict)"))
-        add_spin_row_float(_("G_uida_nce:"), "guidance", 3.5, 0.0, 30.0,
+        add_spin_row_float(_("G_uida_nce:"), "guidance", 0.0, 0.0, 30.0,
                            _("Distilled guidance for flow-matching models like Flux (0=disabled)"))
         add_file_row(_("Sig_mas:"), "sigmas", DEFAULT_SIGMAS,
                      _("Custom sigma schedule (comma-separated values from 1.0 to 0.0) for distilled/turbo models — leave empty to use the model default"))
@@ -276,14 +296,13 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         mode_combo.set_hexpand(True)
         mode_combo.set_valign(Gtk.Align.CENTER)
         mode_combo.append_text("Img2Img (edit)")
-        mode_combo.append_text("Kontext (style transfer)")
+        mode_combo.append_text("Kontext (reference edit)")
         mode_label.set_mnemonic_widget(mode_combo)
-        mode_combo.set_tooltip_text(_("Img2Img: noise+denoise the input image. Kontext: vision-based style transfer via the input as reference"))
+        mode_combo.set_tooltip_text(_("Img2Img: noise then denoise the input image. Kontext: reference-based editing via the input image (Qwen Image Edit, Boogu, Flux Kontext)"))
 
         # Auto-detect mode from model filename
         diffusion_model = config.get_property("diffusion-model") or ""
-        model_name = os.path.basename(diffusion_model).lower()
-        default_mode = "kontext" if "boogu" in model_name or "kontext" in model_name else "img2img"
+        default_mode = "kontext" if uses_reference_image(diffusion_model) else "img2img"
         current_mode = config.get_property("edit-mode") or default_mode
         mode_combo.set_active(0 if current_mode == "img2img" else 1)
         widgets["edit-mode"] = mode_combo
@@ -572,6 +591,13 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         dialog.show_all()
         response = dialog.run()
         dialog.destroy()
+        # gtk_widget_destroy() only queues the window teardown. Flush it now,
+        # otherwise the dead window stays mapped while sd-cli runs (we never
+        # return to the main loop), and the desktop eventually reports
+        # "GIMP is not responding" for it.
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.flush()
 
         if response != Gtk.ResponseType.OK:
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
@@ -613,8 +639,16 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
 
         add_flag("--diffusion-model", config.get_property("diffusion-model"))
         add_flag("--clip_l", config.get_property("clip-l"))
-        add_flag("--llm", config.get_property("llm"))
-        add_flag("--llm_vision", config.get_property("llm-vision"))
+        # Qwen3-VL-based edit models need both the vision LLM and its mmproj
+        # projector; fall back to the configured defaults when left empty.
+        model_path = config.get_property("diffusion-model") or ""
+        llm = config.get_property("llm")
+        llm_vision = config.get_property("llm-vision")
+        if needs_vision_weights(model_path):
+            llm = llm or DEFAULT_LLM
+            llm_vision = llm_vision or DEFAULT_LLM_VISION
+        add_flag("--llm", llm)
+        add_flag("--llm_vision", llm_vision)
         add_flag("--vae", config.get_property("vae"))
         add_flag("--t5xxl", config.get_property("t5xxl"))
         add_flag("--t5", config.get_property("t5"))
@@ -625,24 +659,28 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         if seed is not None:
             command.extend(["--seed", str(seed)])
 
+        # Sampling options apply to both img2img and reference-based editing
+        command.extend([
+            "--steps", str(config.get_property("steps")),
+            "--cfg-scale", str(config.get_property("cfg-scale")),
+        ])
+        # Guidance for distilled flow-matching models
+        guidance = config.get_property("guidance")
+        if guidance:
+            command.extend(["--guidance", str(guidance)])
+        # Custom sigma schedule for distilled/turbo models
+        add_flag("--sigmas", config.get_property("sigmas"))
+        # VAE format override
+        add_flag("--vae-format", config.get_property("vae-format"))
+        # Prediction type override
+        add_flag("--prediction", config.get_property("prediction"))
+
         edit_mode = config.get_property("edit-mode") or "img2img"
         if edit_mode == "kontext":
+            # Reference-based editing: condition on the source image via -r
             command.extend(["-r", str(input_path)])
         else:
-            command.extend([
-                "--steps", str(config.get_property("steps")),
-                "--cfg-scale", str(config.get_property("cfg-scale")),
-            ])
-            # Guidance for distilled flow-matching models
-            guidance = config.get_property("guidance")
-            if guidance:
-                command.extend(["--guidance", str(guidance)])
-            # Custom sigma schedule for distilled/turbo models
-            add_flag("--sigmas", config.get_property("sigmas"))
-            # VAE format override
-            add_flag("--vae-format", config.get_property("vae-format"))
-            # Prediction type override
-            add_flag("--prediction", config.get_property("prediction"))
+            # Classic img2img: noise then denoise the init image
             command.extend(["--init-img", str(input_path)])
             strength = config.get_property("strength")
             if strength is not None:
@@ -656,19 +694,28 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             "-p", config.get_property("prompt"),
         ])
 
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stderr_lines = []
-        for line in process.stderr:
-            stderr_lines.append(line)
-            line = line.rstrip()
-            if line:
-                Gimp.progress_set_text(line)
+        # sd-cli writes its [I]/[W] logs to stdout and [E] to stderr. Merge both
+        # so nothing is lost and the pipe cannot fill and deadlock the process.
+        process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+        output_lines = []
+        for line in process.stdout:
+            output_lines.append(line)
+            stripped = line.rstrip()
+            if stripped and not stripped.startswith("[V]"):
+                Gimp.progress_set_text(stripped)
                 Gimp.progress_pulse()
         process.wait()
 
         if process.returncode != 0:
             error_message = _("AI edit failed. Ensure 'sd-cli' is installed and working.")
-            Gimp.message("%s\nError Output: %s" % (error_message, "".join(stderr_lines)))
+            details = "".join(
+                line for line in output_lines
+                if line.startswith("[E]") or line.startswith("[W]")
+            )
+            if not details:
+                details = "".join(output_lines[-20:])
+            Gimp.message("%s\n\nError Output:\n%s" % (error_message, details))
             return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(error_message))
 
         if not output_path.exists():
@@ -841,7 +888,7 @@ class AIEdit(Gimp.PlugIn):
         # Edit mode
         edit_mode_choice = Gimp.Choice.new()
         edit_mode_choice.add("img2img", 0, "Img2Img (edit)", "Standard img2img: noise then denoise the input image")
-        edit_mode_choice.add("kontext", 1, "Kontext (style transfer)", "Flux Kontext: vision-based style transfer via ref image")
+        edit_mode_choice.add("kontext", 1, "Kontext (reference edit)", "Reference-based editing: pass the input as a reference image (Qwen Image Edit, Boogu, Flux Kontext)")
         procedure.add_choice_argument(
             "edit-mode", _("Edit _Mode"), _("Editing mode: img2img or Kontext style transfer"),
             edit_mode_choice, "img2img", GObject.ParamFlags.READWRITE,
