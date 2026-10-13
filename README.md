@@ -17,13 +17,13 @@ A collection of Python-based AI plugins for **GIMP 3** (GNU Image Manipulation P
 
 **Arbitrary command execution.** Plugins for most applications can run any commands. This is not new. Open source relies on the community to find and fix bugs and exploits. You should always review new source code or test in a sandbox.
 
-Don't download from untrusted places. The official locaiton for these plugins is https://github.com/themanyone/gimp-plugins
+Don't download from untrusted places. The official location for these plugins is https://github.com/themanyone/gimp-plugins
 
 ## Requirements
 
 - **GIMP 3.0+** — these plugins use the GIMP 3 Python API (`gi.require_version('Gimp', '3.0')`)
 - **Python 3** — GIMP 3 ships with its own Python environment
-- **CUDA-capable GPU** — strongly recommended for the upscale, image edit plugins.
+- **GPU Acceleration** — e.g. CUDA strongly recommended for the upscale, image edit plugins.
 
 ## Installation
 
@@ -88,15 +88,21 @@ The SD Server plugin connects to a running `sd-server` instance from [stable-dif
 
 - **txt2img** — generate new images from a text prompt
 - **img2img** — edit the current layer using a diffusion model
-- **Reference-based editing** — Kontext, Boogu, Z-Image models (uses `extra_images` for reference conditioning)
+- **Reference-based editing** — Qwen Image 2.1, Kontext, Boogu, Z-Image models (uses `extra_images` for reference conditioning)
 
 Start the server first, then use the plugin from GIMP:
 
 ```bash
-sd-server --diffusion-model path/to/model.gguf --vae path/to/vae.safetensors \
-  --llm path/to/llm.gguf --llm_vision path/to/mmproj.gguf \
+# Qwen Image 2.1 Turbo with the Qwen3-VL 8B vision LLM (same files as AI Edit below)
+sd-server \
+  --diffusion-model ~/Downloads/src/ComfyUI/models/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf \
+  --vae ~/Downloads/src/ComfyUI/models/vae/qwen_image_2.1_vae_bf16.safetensors \
+  --llm ~/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS/Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf \
+  --llm_vision ~/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS/mmproj-F16.gguf \
   --diffusion-fa --offload-to-cpu -v
 ```
+
+Swap in any other diffusion model, VAE and text encoder.
 
 The plugin auto-detects the loaded model and available features via `/sdcpp/v1/capabilities`. The model name is shown in the dialog.
 
@@ -136,11 +142,22 @@ It is not necessary to edit `upscale/upscale.py` to:
 
 The `aiimage` plugin calls `sd-cli` from the command line. It's a bit more complicated to use. But it offers more flexibility and of course it doesn't require a server. Find the AI Image dialog under File -> Create.
 
-Edit [aiimage.py](aiimage/aiimage.py) and set `MODELS_PATH` to where your models are. Or just enter the full path to each model into the dialog at runtime and save preferences. We are reusing our ComfyUI models but yours will be somewhere else.
+Edit [aiimage.py](aiimage/aiimage.py) and set `MODELS_PATH` and `LLM_PATH` to where your models are. Or just enter the full path to each model into the dialog at runtime and save preferences. We are reusing our ComfyUI models but yours will be somewhere else.
 
-**Z Image Turbo.**
+**Qwen Image 2.1 Turbo (default).**
 
-Z Image Turbo is for fast image generation in 4-6 steps. We can't wait for a Z Image Edit model. Enter default model locations into `aiimage/aiimage.py`, or enter them into the dialog at runtime. Try small images first.
+Text-to-image with the same models as AI Edit (see below). It only needs 8 steps at CFG scale 1.0 with the Turbo sigma schedule. Download them with the `hf download` commands in the AI Edit section; the defaults are:
+
+```python
+DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf"
+DEFAULT_LLM = LLM_PATH + "/Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf"
+DEFAULT_LLM_VISION = LLM_PATH + "/mmproj-F16.gguf"
+DEFAULT_VAE = MODELS_PATH + "/vae/qwen_image_2.1_vae_bf16.safetensors"
+```
+
+**Z Image Turbo (alternative).**
+
+Z Image Turbo is for fast image generation in 4-6 steps. Enter these model locations into the dialog and save a preset:
 
 ```python
 DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/z-image-turbo-Q5_K_M.gguf"
@@ -149,13 +166,43 @@ DEFAULT_LLM_VISION = ""
 DEFAULT_VAE = MODELS_PATH + "/vae/ae.safetensors"
 ```
 
-AI Edit models may also be used.
-
 ### AI Edit
 
 Like `aiimage` the `aiedit` plugin calls `sd-cli` from the command line. Find the AI Edit plugin under Filters -> AI.
 
 Scale images down to 256x256 or lower for testing AI Edit. Editing large images takes longer. Default model paths may be edited into the top of `aiedit/aiedit.py` or enter the paths into the dialog at run time.
+
+**Qwen Image 2.1 Turbo (default).**
+
+This is the default AI Edit model. It edits the current image from a text prompt, using the source image as a reference (`-r`) together with the Qwen3-VL vision LLM. It is a distilled model, so it only needs 8 steps at CFG scale 1.0; the plugin selects reference editing and the fixed Turbo sigma schedule automatically.
+
+Download the four files with the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) (`pip install -U "huggingface_hub[cli]"`, or `curl -LsSf https://hf.co/cli/install.sh | bash`):
+
+```shell
+# Diffusion model: Qwen Image 2.1 Turbo, Q4_K_M GGUF
+hf download unsloth/Qwen-Image-2.1-Turbo-GGUF qwen-image-2.1-turbo-Q4_K_M.gguf \
+  --local-dir ~/Downloads/src/ComfyUI/models/diffusion_models
+
+# Vision LLM and its mmproj projector: Qwen3-VL 8B
+hf download unsloth/Qwen3-VL-8B-Instruct-GGUF \
+  Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf mmproj-F16.gguf \
+  --local-dir ~/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS
+
+# VAE
+hf download Comfy-Org/Qwen-Image-2.1 vae/qwen_image_2.1_vae_bf16.safetensors \
+  --local-dir ~/Downloads/src/ComfyUI/models
+```
+
+These are the defaults at the top of `aiedit/aiedit.py`. Set `MODELS_PATH` and `LLM_PATH` for your machine, or enter the paths in the dialog:
+
+```python
+DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf"
+DEFAULT_LLM = LLM_PATH + "/Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf"
+DEFAULT_LLM_VISION = LLM_PATH + "/mmproj-F16.gguf"
+DEFAULT_VAE = MODELS_PATH + "/vae/qwen_image_2.1_vae_bf16.safetensors"
+```
+
+Pick the **Default** preset in the dialog to load these, along with 8 steps, CFG scale 1.0 and the Turbo sigma schedule.
 
 **Boogu Edit.**
 

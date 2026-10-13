@@ -52,12 +52,14 @@ def N_(message): return message
 # Models paths
 HOME_PATH = os.environ.get('HOME')
 MODELS_PATH = HOME_PATH + "/Downloads/src/ComfyUI/models"
+LLM_PATH = "/win/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS"
 
-# Default paths
-DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/z-image-turbo-Q5_K_M.gguf"
-DEFAULT_LLM = MODELS_PATH + "/text_encoders/qwen_3_4b.safetensors"
-DEFAULT_LLM_VISION = ""
-DEFAULT_VAE = MODELS_PATH + "/vae/ae.safetensors"
+# Default paths (Qwen Image 2.1 Turbo)
+DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf"
+DEFAULT_LLM = LLM_PATH + "/Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf"
+DEFAULT_LLM_VISION = LLM_PATH + "/mmproj-F16.gguf"
+DEFAULT_VAE = MODELS_PATH + "/vae/qwen_image_2.1_vae_bf16.safetensors"
+DEFAULT_SIGMAS = "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
 
 # Config presets directory
 CONFIG_DIR = os.path.join(os.environ.get('HOME'), '.config', 'gimp-plugins', 'aiimage')
@@ -97,6 +99,30 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
 
         row = 0
 
+        # Built-in preset shown first in the dropdown. Selecting it restores
+        # the script-defined defaults for every field (including sigmas).
+        DEFAULT_PRESET_NAME = _("Default")
+
+        def build_default_preset():
+            return {
+                "diffusion-model": DEFAULT_DIFFUSION_MODEL,
+                "llm": DEFAULT_LLM,
+                "llm-vision": DEFAULT_LLM_VISION,
+                "vae": DEFAULT_VAE,
+                "t5xxl": "",
+                "t5": "",
+                "lora": "",
+                "width": 1024,
+                "height": 1024,
+                "steps": 8,
+                "cfg-scale": 1.0,
+                "guidance": 0.0,
+                "sigmas": DEFAULT_SIGMAS,
+                "vae-format": "auto",
+                "prediction": "",
+                "prompt": "",
+            }
+
         # --- Preset management row ---
         preset_label = Gtk.Label.new_with_mnemonic(_("_Preset:"))
         preset_label.set_halign(Gtk.Align.START)
@@ -107,11 +133,12 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         preset_combo.set_valign(Gtk.Align.CENTER)
         preset_label.set_mnemonic_widget(preset_combo)
 
-        preset_names = get_preset_names()
-        for name in preset_names:
+        preset_combo.append_text(DEFAULT_PRESET_NAME)
+        for name in get_preset_names():
+            if name == DEFAULT_PRESET_NAME:
+                continue
             preset_combo.append_text(name)
-        if preset_names:
-            preset_combo.set_active(0)
+        preset_combo.set_active(0)
 
         save_btn = Gtk.Button.new_with_mnemonic(_("_Save"))
         rename_btn = Gtk.Button.new_with_mnemonic(_("_Rename"))
@@ -204,9 +231,10 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         add_file_row(_("LoR_A:"), "lora", "")
         add_spin_row(_("_Width:"), "width", 1024, 64, 8192)
         add_spin_row(_("_Height:"), "height", 1024, 64, 8192)
-        add_spin_row(_("_Steps:"), "steps", 4, 1, 100)
-        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 4.0, 0.0, 30.0)
-        add_spin_row_float(_("G_uida_nce:"), "guidance", 3.5, 0.0, 30.0)
+        add_spin_row(_("_Steps:"), "steps", 8, 1, 100)
+        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 1.0, 0.0, 30.0)
+        add_spin_row_float(_("G_uida_nce:"), "guidance", 0.0, 0.0, 30.0)
+        add_file_row(_("Sig_mas:"), "sigmas", DEFAULT_SIGMAS)
         add_file_row(_("VAE _Format:"), "vae-format", "auto")
         add_file_row(_("_Prediction:"), "prediction", "")
 
@@ -235,9 +263,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         text_view.get_buffer().connect("changed", on_text_changed)
         prompt_label.set_mnemonic_widget(text_view)
 
-        # Shift+Enter submits the dialog
+        # Ctrl+Enter submits the dialog
         def on_text_view_key(view, event, dlg):
-            if event.keyval == Gdk.KEY_Return and (event.state & Gdk.ModifierType.SHIFT_MASK):
+            if event.keyval == Gdk.KEY_Return and (event.state & Gdk.ModifierType.CONTROL_MASK):
                 dlg.response(Gtk.ResponseType.OK)
                 return True
             return False
@@ -251,8 +279,11 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         # --- Preset callbacks ---
 
         def load_preset_values(preset_name):
-            presets = load_presets()
-            preset = presets.get(preset_name, {})
+            if preset_name == DEFAULT_PRESET_NAME:
+                preset = build_default_preset()
+            else:
+                presets = load_presets()
+                preset = presets.get(preset_name, {})
             for key, value in preset.items():
                 # Set config property with correct type
                 prop = procedure.find_property(key)
@@ -279,6 +310,23 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                         buf = widget.get_buffer()
                         text = str(value)
                         buf.set_text(text, len(text))
+                except (ValueError, TypeError):
+                    pass
+            # Clear widgets not in the preset
+            for key, widget in widgets.items():
+                if key in preset:
+                    continue
+                try:
+                    if isinstance(widget, Gtk.Entry):
+                        widget.set_text("")
+                    elif isinstance(widget, Gtk.SpinButton):
+                        prop = procedure.find_property(key)
+                        if prop:
+                            widget.set_value(prop.default_value)
+                        else:
+                            widget.set_value(0)
+                    elif isinstance(widget, Gtk.TextView):
+                        widget.get_buffer().set_text("", 0)
                 except (ValueError, TypeError):
                     pass
 
@@ -338,23 +386,25 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             if response != Gtk.ResponseType.OK or not name:
                 return
 
+            if name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("'%s' is a built-in preset and cannot be overwritten.") % name)
+                return
+
             presets = load_presets()
             presets[name] = values
             save_presets(presets)
 
-            # Update combo
+            # Update combo and select the saved preset
+            model = preset_combo.get_model()
             found = False
-            for i in range(preset_combo.get_model().iter_n_children(None)):
-                if preset_combo.get_active_text() == name:
+            for i in range(model.iter_n_children(None)):
+                if model.get_value(model.get_iter(i), 0) == name:
+                    preset_combo.set_active(i)
                     found = True
                     break
             if not found:
                 preset_combo.append_text(name)
-            preset_combo.set_active(-1)
-            for i in range(preset_combo.get_model().iter_n_children(None)):
-                if preset_combo.get_model().get_value(preset_combo.get_model().get_iter(i), 0) == name:
-                    preset_combo.set_active(i)
-                    break
+                preset_combo.set_active(model.iter_n_children(None) - 1)
 
         def on_rename_preset(btn):
             active = preset_combo.get_active()
@@ -362,6 +412,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                 return
             old_name = preset_combo.get_active_text()
             if not old_name:
+                return
+            if old_name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("The built-in '%s' preset cannot be renamed.") % old_name)
                 return
 
             name_dialog = Gtk.Dialog(title=_("Rename Preset"), transient_for=dialog,
@@ -387,6 +440,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
 
             if response != Gtk.ResponseType.OK or not new_name or new_name == old_name:
                 return
+            if new_name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("'%s' is reserved for the built-in preset.") % new_name)
+                return
 
             presets = load_presets()
             presets[new_name] = presets.pop(old_name)
@@ -405,6 +461,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                 return
             name = preset_combo.get_active_text()
             if not name:
+                return
+            if name == DEFAULT_PRESET_NAME:
+                Gimp.message(_("The built-in '%s' preset cannot be deleted.") % name)
                 return
 
             confirm = Gtk.MessageDialog(transient_for=dialog, modal=True,
@@ -494,6 +553,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         guidance = config.get_property("guidance")
         if guidance is not None:
             command.extend(["--guidance", str(guidance)])
+
+        # Custom sigma schedule for distilled/turbo models
+        add_flag("--sigmas", config.get_property("sigmas"))
 
         # VAE format override
         add_flag("--vae-format", config.get_property("vae-format"))
@@ -628,17 +690,22 @@ class AIImage(Gimp.PlugIn):
         # Steps
         procedure.add_int_argument(
             "steps", _("_Steps"), _("Number of sampling steps"),
-            1, 100, 4, GObject.ParamFlags.READWRITE,
+            1, 100, 8, GObject.ParamFlags.READWRITE,
         )
         # CFG scale (traditional, for CFG-based models)
         procedure.add_double_argument(
             "cfg-scale", _("CFG S_cale"), _("Classifier-free guidance scale (traditional models)"),
-            0.0, 30.0, 4.0, GObject.ParamFlags.READWRITE,
+            0.0, 30.0, 1.0, GObject.ParamFlags.READWRITE,
         )
-        # Guidance (distilled, for flow-matching models like Z-Image-Turbo)
+        # Guidance (distilled, for flow-matching models)
         procedure.add_double_argument(
             "guidance", _("G_uida_nce"), _("Distilled guidance scale for flow-matching models"),
-            0.0, 30.0, 3.5, GObject.ParamFlags.READWRITE,
+            0.0, 30.0, 0.0, GObject.ParamFlags.READWRITE,
+        )
+        # Custom sigma schedule (distilled/turbo models)
+        procedure.add_string_argument(
+            "sigmas", _("Sig_mas"), _("Custom sigma schedule (comma-separated values from 1.0 to 0.0)"),
+            DEFAULT_SIGMAS, GObject.ParamFlags.READWRITE,
         )
         # VAE format override
         procedure.add_string_argument(

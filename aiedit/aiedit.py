@@ -347,9 +347,9 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         text_view.get_buffer().connect("changed", on_text_changed)
         prompt_label.set_mnemonic_widget(text_view)
 
-        # Shift+Enter submits the dialog, plain Enter inserts a newline
+        # Ctrl+Enter submits the dialog, plain Enter inserts a newline
         def on_text_view_key(view, event, dlg):
-            if event.keyval == Gdk.KEY_Return and (event.state & Gdk.ModifierType.SHIFT_MASK):
+            if event.keyval == Gdk.KEY_Return and (event.state & Gdk.ModifierType.CONTROL_MASK):
                 dlg.response(Gtk.ResponseType.OK)
                 return True
             return False

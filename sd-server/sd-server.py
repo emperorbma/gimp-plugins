@@ -369,7 +369,7 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
 
         def on_text_view_key(view, event, dlg):
             if (event.keyval == Gdk.KEY_Return and
-                    (event.state & Gdk.ModifierType.SHIFT_MASK)):
+                    (event.state & Gdk.ModifierType.CONTROL_MASK)):
                 dlg.response(Gtk.ResponseType.OK)
                 return True
             return False
@@ -410,7 +410,7 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
 
         def on_neg_text_view_key(view, event, dlg):
             if (event.keyval == Gdk.KEY_Return and
-                    (event.state & Gdk.ModifierType.SHIFT_MASK)):
+                    (event.state & Gdk.ModifierType.CONTROL_MASK)):
                 dlg.response(Gtk.ResponseType.OK)
                 return True
             return False
