@@ -116,6 +116,16 @@ The plugin auto-detects the loaded model and available features via `/sdcpp/v1/c
 
 **OpenAI-compatible servers.** The plugin can also connect to any OpenAI-compatible `/v1/images/generations` endpoint (not just `sd-server`) — just point the Server URL field to any compatible API.
 
+![AI Edit in GIMP 3](aiedit/images/gimp-plugins-multi-layer.webp)
+
+**Multi-layer edit (object & style transfer).** With a reference-capable model (Qwen Image 2.1, Kontext, Boogu, Z-Image), tick **Multi-layer edit** in the dialog to send individual layers to the server as separate reference images. Each checked layer is labeled positionally (`image 1`, `image 2`, ...) in layer-stack order (topmost = `image 1`); the layer being edited is always included. Rename your layers so you can identify them in the list, then refer to them by number in the prompt:
+
+- **Object transfer:** check the couch layer and the room layer, then prompt `Put the couch in image 1 into the room in image 2.`
+- **Style transfer:** check the style source and the target, then prompt `Render image 2 in the style of image 1.`
+
+Placing objects needs near-full **Init Strength** and **Guidance above 1.0**, so enabling multi-layer edit raises them (to 0.9 and 3.0) automatically — adjust as needed.
+
+
 ### Background Remove
 
 - This works with existing tools.
@@ -168,7 +178,7 @@ DEFAULT_VAE = MODELS_PATH + "/vae/ae.safetensors"
 
 ### AI Edit
 
-Like `aiimage` the `aiedit` plugin calls `sd-cli` from the command line. Find the AI Edit plugin under Filters -> AI.
+Like `aiimage` the `aiedit` plugin calls `sd-cli` from the command line. It's good for simple, single-layer edits. Find the AI Edit plugin under Filters -> AI.
 
 Scale images down to 256x256 or lower for testing AI Edit. Editing large images takes longer. Default model paths may be edited into the top of `aiedit/aiedit.py` or enter the paths into the dialog at run time.
 

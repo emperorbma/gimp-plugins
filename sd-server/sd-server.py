@@ -345,9 +345,9 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
                 return
             if multi_layer_check.get_active():
                 if denoise_spin.get_value() <= 0.8:
-                    denoise_spin.set_value(1.0)
+                    denoise_spin.set_value(0.9)
                 if cfg_spin.get_value() <= 1.5:
-                    cfg_spin.set_value(7.0)
+                    cfg_spin.set_value(3.0)
                 multi_layer_hint.set_text(_("Init Strength ~0.9 and Guidance > 1.0 recommended."))
             else:
                 multi_layer_hint.set_text("")

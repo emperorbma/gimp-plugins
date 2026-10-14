@@ -192,14 +192,14 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 "control-net": "",
                 "steps": 8,
                 "cfg-scale": 1.0,
-                "guidance": 0.0,
+                "guidance": 3.0,
                 "sigmas": DEFAULT_SIGMAS,
                 "vae-format": "auto",
                 "prediction": "",
                 "edit-mode": default_mode,
                 "use-selection": True,
                 "seed": -1,
-                "strength": 0.75,
+                "strength": 0.9,
                 "prompt": "",
             }
 
