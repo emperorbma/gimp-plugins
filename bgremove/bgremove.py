@@ -46,6 +46,25 @@ gettext.textdomain(PLUGIN_NAME)
 def _(message): return gettext.gettext(message)
 def N_(message): return message # For strings that should not be translated immediately
 
+def paste_layer_aligned(image, target_layer, source_layer):
+    """Copy `source_layer`'s pixels into `target_layer`, aligned to the target
+    layer origin. An active selection is temporarily cleared so the marching
+    ants cannot shift the pasted content, then restored."""
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    non_empty = result[1] if len(result) == 6 else result[0] if result else False
+    saved_channel = None
+    if non_empty:
+        saved_channel = selection.save(image)
+        Gimp.Selection.none(image)
+    Gimp.edit_copy([source_layer])
+    floating_sel = Gimp.edit_paste(target_layer, False)
+    if floating_sel:
+        Gimp.floating_sel_anchor(floating_sel[0])
+    if saved_channel is not None:
+        image.select_item(Gimp.ChannelOps.REPLACE, saved_channel)
+        image.remove_channel(saved_channel)
+
 def bgremove_func(procedure, run_mode, image, drawables, config, data):
     # This plugin is primarily non-interactive, as backgroundremover has few user options
     # and we want quick execution.
@@ -156,10 +175,7 @@ def bgremove_func(procedure, run_mode, image, drawables, config, data):
         Gimp.progress_set_text(_("Transferring layer data..."))
 
         # 6. Copy the new_layer image data to the final_layer
-        Gimp.edit_copy([new_layer])
-
-        floating_sel = Gimp.edit_paste(final_layer, False)
-        Gimp.floating_sel_anchor(floating_sel[0])
+        paste_layer_aligned(image, final_layer, new_layer)
 
         # Clean up temp image
         Gimp.Image.delete(imported_image)

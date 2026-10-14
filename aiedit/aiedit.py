@@ -83,6 +83,55 @@ def needs_vision_weights(model_path):
     return any(hint in name for hint in VISION_EDIT_HINTS)
 
 
+def export_selection_mask(image, path):
+    """Export the current selection (marching ants or quick mask) as a
+    full-canvas grayscale PNG mask at `path`. White marks the selected region,
+    which sd-cli repaints via --mask. Returns True when a non-empty selection
+    existed and the file was written."""
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    if not result:
+        return False
+    non_empty = result[1] if len(result) == 6 else result[0]
+    if not non_empty:
+        return False
+
+    width = image.get_width()
+    height = image.get_height()
+    mask_image = Gimp.Image.new(width, height, Gimp.ImageBaseType.GRAY)
+    layer = Gimp.Layer.new(mask_image, "mask", width, height,
+                           Gimp.ImageType.GRAY_IMAGE, 100.0,
+                           Gimp.LayerMode.NORMAL)
+    mask_image.insert_layer(layer, None, 0)
+    Gimp.edit_copy([selection])
+    floating = Gimp.edit_paste(layer, False)
+    Gimp.floating_sel_anchor(floating[0])
+    Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, mask_image,
+                   Gio.File.new_for_path(str(path)), None)
+    Gimp.Image.delete(mask_image)
+    return True
+
+
+def paste_layer_aligned(image, target_layer, source_layer):
+    """Copy `source_layer`'s pixels into `target_layer`, aligned to the target
+    layer origin. An active selection is temporarily cleared so the marching
+    ants cannot shift the pasted content, then restored."""
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    non_empty = result[1] if len(result) == 6 else result[0] if result else False
+    saved_channel = None
+    if non_empty:
+        saved_channel = selection.save(image)
+        Gimp.Selection.none(image)
+    Gimp.edit_copy([source_layer])
+    floating_sel = Gimp.edit_paste(target_layer, False)
+    if floating_sel:
+        Gimp.floating_sel_anchor(floating_sel[0])
+    if saved_channel is not None:
+        image.select_item(Gimp.ChannelOps.REPLACE, saved_channel)
+        image.remove_channel(saved_channel)
+
+
 # Config presets directory
 CONFIG_DIR = os.path.join(os.environ.get('HOME'), '.config', 'gimp-plugins', 'aiedit')
 PRESETS_FILE = os.path.join(CONFIG_DIR, 'presets.json')
@@ -148,6 +197,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 "vae-format": "auto",
                 "prediction": "",
                 "edit-mode": default_mode,
+                "use-selection": True,
                 "seed": -1,
                 "strength": 0.75,
                 "prompt": "",
@@ -315,6 +365,24 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         grid.attach(mode_combo, 1, row, 1, 1)
         row += 1
 
+        # Restrict the edit to the current selection (inpaint)
+        use_selection_check = Gtk.CheckButton.new_with_mnemonic(
+            _("Use _selection as mask (inpaint only selected area)"))
+        use_selection_check.set_active(bool(config.get_property("use-selection")))
+        use_selection_check.set_tooltip_text(
+            _("Restrict the AI edit to the current marching-ants selection or "
+              "quick mask. Without a selection, the whole image is edited."))
+        use_selection_check.set_hexpand(True)
+        use_selection_check.set_halign(Gtk.Align.START)
+        widgets["use-selection"] = use_selection_check
+
+        def on_use_selection_toggled(cb):
+            config.set_property("use-selection", cb.get_active())
+
+        use_selection_check.connect("toggled", on_use_selection_toggled)
+        grid.attach(use_selection_check, 0, row, 2, 1)
+        row += 1
+
         add_spin_row(_("_Seed:"), "seed", -1, -1, 2147483647,
                      _("Random seed (-1 for random) — use the same seed to reproduce results"))
 
@@ -397,6 +465,11 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                     elif isinstance(widget, Gtk.ComboBoxText):
                         if key == "edit-mode":
                             widget.set_active(0 if str(value) == "img2img" else 1)
+                    elif isinstance(widget, Gtk.CheckButton):
+                        if isinstance(value, bool):
+                            widget.set_active(value)
+                        else:
+                            widget.set_active(str(value).lower() in ("1", "true", "yes", "on"))
                 except (ValueError, TypeError):
                     pass
             # Clear widgets not in the preset
@@ -416,6 +489,12 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                         widget.get_buffer().set_text("", 0)
                     elif isinstance(widget, Gtk.ComboBoxText):
                         widget.set_active(0)
+                    elif isinstance(widget, Gtk.CheckButton):
+                        prop = procedure.find_property(key)
+                        if prop:
+                            widget.set_active(bool(prop.default_value))
+                        else:
+                            widget.set_active(False)
                 except (ValueError, TypeError):
                     pass
 
@@ -448,6 +527,8 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                         values[key] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
                     elif isinstance(widget, Gtk.ComboBoxText):
                         values[key] = "img2img" if widget.get_active() == 0 else "kontext"
+                    elif isinstance(widget, Gtk.CheckButton):
+                        values[key] = widget.get_active()
                 except (ValueError, TypeError):
                     pass
             return values
@@ -611,6 +692,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
     drawable = drawables[0]
     input_path = None
     output_path = None
+    mask_path = None
 
     try:
         temp_dir = Path(tempfile.gettempdir())
@@ -625,6 +707,13 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             Gio.File.new_for_path(str(input_path)),
             None
         )
+
+        # Export the current selection (marching ants or quick mask) as an
+        # inpaint mask when requested and a non-empty selection exists.
+        if config.get_property("use-selection"):
+            mask_path = temp_dir / f"gimp_aiedit_mask_{os.getpid()}.png"
+            if not export_selection_mask(image, mask_path):
+                mask_path = None
 
         Gimp.progress_set_text(_("Running AI edit (this may take time)..."))
         Gimp.progress_pulse()
@@ -685,6 +774,15 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             strength = config.get_property("strength")
             if strength is not None:
                 command.extend(["--strength", str(strength)])
+
+        # Restrict inpainting to the marching-ants selection when available.
+        # The mask needs the source as an init image to blend against; in
+        # kontext mode the reference alone leaves the unmasked region filled
+        # from a blank latent, which comes out garbled.
+        if mask_path is not None:
+            if edit_mode == "kontext":
+                command.extend(["--init-img", str(input_path)])
+            command.extend(["--mask", str(mask_path)])
 
         command.extend([
             "--diffusion-fa",
@@ -750,9 +848,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                            image.get_item_position(drawable))
 
         Gimp.progress_set_text(_("Transferring layer data..."))
-        Gimp.edit_copy([new_layer])
-        floating_sel = Gimp.edit_paste(final_layer, False)
-        Gimp.floating_sel_anchor(floating_sel[0])
+        paste_layer_aligned(image, final_layer, new_layer)
 
         Gimp.Image.delete(imported_image)
 
@@ -771,6 +867,8 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             os.remove(input_path)
         if output_path and output_path.exists():
             os.remove(output_path)
+        if mask_path and mask_path.exists():
+            os.remove(mask_path)
 
     Gimp.displays_flush()
     image.undo_group_end()
@@ -892,6 +990,11 @@ class AIEdit(Gimp.PlugIn):
         procedure.add_choice_argument(
             "edit-mode", _("Edit _Mode"), _("Editing mode: img2img or Kontext style transfer"),
             edit_mode_choice, "img2img", GObject.ParamFlags.READWRITE,
+        )
+        # Use selection as inpaint mask
+        procedure.add_boolean_argument(
+            "use-selection", _("Use _selection as mask"), _("Limit the edit to the current selection (inpaint)"),
+            True, GObject.ParamFlags.READWRITE,
         )
         # Seed
         procedure.add_int_argument(

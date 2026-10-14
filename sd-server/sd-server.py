@@ -62,6 +62,56 @@ def _fetch_capabilities(server_url):
         return None
 
 
+def export_selection_mask(image, path):
+    """Export the current selection (marching ants or quick mask) as a
+    full-canvas grayscale PNG mask at `path`. White marks the selected region,
+    which the server repaints via the img2img mask field. Returns True when a
+    non-empty selection existed and the file was written."""
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    if not result:
+        return False
+    non_empty = result[1] if len(result) == 6 else result[0]
+    if not non_empty:
+        return False
+
+    width = image.get_width()
+    height = image.get_height()
+    mask_image = Gimp.Image.new(width, height, Gimp.ImageBaseType.GRAY)
+    layer = Gimp.Layer.new(mask_image, "mask", width, height,
+                           Gimp.ImageType.GRAY_IMAGE, 100.0,
+                           Gimp.LayerMode.NORMAL)
+    mask_image.insert_layer(layer, None, 0)
+    Gimp.edit_copy([selection])
+    floating = Gimp.edit_paste(layer, False)
+    if floating:
+        Gimp.floating_sel_anchor(floating[0])
+    Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, mask_image,
+                   Gio.File.new_for_path(str(path)), None)
+    Gimp.Image.delete(mask_image)
+    return True
+
+
+def paste_layer_aligned(image, target_layer, source_layer):
+    """Copy `source_layer`'s pixels into `target_layer`, aligned to the target
+    layer origin. An active selection is temporarily cleared so the marching
+    ants cannot shift the pasted content, then restored."""
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    non_empty = result[1] if len(result) == 6 else result[0] if result else False
+    saved_channel = None
+    if non_empty:
+        saved_channel = selection.save(image)
+        Gimp.Selection.none(image)
+    Gimp.edit_copy([source_layer])
+    floating_sel = Gimp.edit_paste(target_layer, False)
+    if floating_sel:
+        Gimp.floating_sel_anchor(floating_sel[0])
+    if saved_channel is not None:
+        image.select_item(Gimp.ChannelOps.REPLACE, saved_channel)
+        image.remove_channel(saved_channel)
+
+
 def sd_server_func(procedure, run_mode, image, drawables, config, data):
     if run_mode == Gimp.RunMode.INTERACTIVE:
         GimpUi.init(PLUGIN_NAME)
@@ -175,6 +225,24 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
 
         generate_label.connect("toggled", on_generate_changed)
         grid.attach(generate_label, 0, row, 2, 1)
+        row += 1
+
+        # --- Use selection as mask checkbox ---
+        use_selection_check = Gtk.CheckButton.new_with_mnemonic(
+            _("Use _selection as mask (edit only selected area)")
+        )
+        use_selection_check.set_halign(Gtk.Align.START)
+        use_selection_check.set_valign(Gtk.Align.CENTER)
+        use_selection_check.set_active(
+            config.get_property("use-selection") or False
+        )
+        use_selection_check.set_tooltip_text(_("When editing, restrict changes to the current marching-ants selection or quick mask. Without a selection, the whole image is edited. Has no effect when generating a new image."))
+
+        def on_use_selection_changed(cb):
+            config.set_property("use-selection", cb.get_active())
+
+        use_selection_check.connect("toggled", on_use_selection_changed)
+        grid.attach(use_selection_check, 0, row, 2, 1)
         row += 1
 
         # --- Width ---
@@ -548,6 +616,7 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
     drawable = drawables[0]
     input_path = None
     output_path = None
+    mask_path = None
 
     # Check server capabilities to pick the right endpoint
     caps = _fetch_capabilities(server_url)
@@ -589,6 +658,17 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
         with open(input_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+        # Export the current selection (marching ants or quick mask) as an
+        # inpaint mask when requested and a non-empty selection exists.
+        mask_b64 = None
+        if config.get_property("use-selection"):
+            mask_path = temp_dir / f"gimp_sdserver_mask_{os.getpid()}.png"
+            if export_selection_mask(image, mask_path):
+                with open(mask_path, "rb") as f:
+                    mask_b64 = base64.b64encode(f.read()).decode("utf-8")
+            else:
+                mask_path = None
+
         # Vision edit models (Boogu, Qwen, Longcat) and Kontext/ref models
         # need extra_images for reference conditioning.
         if is_vision_edit or is_kontext or supports_ref:
@@ -619,13 +699,13 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
             payload["seed"] = seed
         if sampler:
             payload["sampler_name"] = sampler
+        if mask_b64:
+            payload["mask"] = mask_b64
 
-        width = config.get_property("width")
-        height = config.get_property("height")
-        if width:
-            payload["width"] = width
-        if height:
-            payload["height"] = height
+        # Match the edit output to the source canvas so the new layer does not
+        # resize the image. The width/height config only applies to generation.
+        payload["width"] = image.get_width()
+        payload["height"] = image.get_height()
 
         response = requests.post(
             f"{server_url}/sdapi/v1/img2img",
@@ -670,9 +750,7 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
 
         Gimp.progress_set_text(_("Transferring layer data..."))
 
-        Gimp.edit_copy([new_layer])
-        floating_sel = Gimp.edit_paste(final_layer, False)
-        Gimp.floating_sel_anchor(floating_sel[0])
+        paste_layer_aligned(image, final_layer, new_layer)
 
         Gimp.Image.delete(imported_image)
 
@@ -693,6 +771,8 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
             os.remove(input_path)
         if output_path and output_path.exists():
             os.remove(output_path)
+        if mask_path and mask_path.exists():
+            os.remove(mask_path)
 
     Gimp.displays_flush()
     image.undo_group_end()
@@ -748,6 +828,12 @@ class SDServer(Gimp.PlugIn):
             "generate-new", _("Generate new"),
             _("Generate a new image instead of editing the current layer"),
             False, GObject.ParamFlags.READWRITE,
+        )
+        # Use selection as inpaint mask (edit mode)
+        procedure.add_boolean_argument(
+            "use-selection", _("Use _selection as mask"),
+            _("Restrict edits to the current selection (inpaint)"),
+            True, GObject.ParamFlags.READWRITE,
         )
         # Width
         procedure.add_int_argument(
