@@ -157,7 +157,7 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         # Widget storage for preset load/save
         widgets = {}
 
-        def add_file_row(label_text, prop_name, default):
+        def add_file_row(label_text, prop_name, default, tooltip=None):
             nonlocal row
             label = Gtk.Label.new_with_mnemonic(label_text)
             label.set_halign(Gtk.Align.START)
@@ -167,6 +167,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             entry.set_hexpand(True)
             entry.set_valign(Gtk.Align.CENTER)
             label.set_mnemonic_widget(entry)
+            if tooltip:
+                label.set_tooltip_text(tooltip)
+                entry.set_tooltip_text(tooltip)
             widgets[prop_name] = entry
 
             def on_entry_changed(e, pn=prop_name):
@@ -178,7 +181,7 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             row += 1
             return entry
 
-        def add_spin_row(label_text, prop_name, default, min_val, max_val):
+        def add_spin_row(label_text, prop_name, default, min_val, max_val, tooltip=None):
             nonlocal row
             label = Gtk.Label.new_with_mnemonic(label_text)
             label.set_halign(Gtk.Align.START)
@@ -189,6 +192,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             spin.set_hexpand(True)
             spin.set_valign(Gtk.Align.CENTER)
             label.set_mnemonic_widget(spin)
+            if tooltip:
+                label.set_tooltip_text(tooltip)
+                spin.set_tooltip_text(tooltip)
             widgets[prop_name] = spin
 
             def on_spin_changed(s, pn=prop_name):
@@ -200,7 +206,7 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             row += 1
             return spin
 
-        def add_spin_row_float(label_text, prop_name, default, min_val, max_val):
+        def add_spin_row_float(label_text, prop_name, default, min_val, max_val, tooltip=None):
             nonlocal row
             label = Gtk.Label.new_with_mnemonic(label_text)
             label.set_halign(Gtk.Align.START)
@@ -211,6 +217,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             spin.set_hexpand(True)
             spin.set_valign(Gtk.Align.CENTER)
             label.set_mnemonic_widget(spin)
+            if tooltip:
+                label.set_tooltip_text(tooltip)
+                spin.set_tooltip_text(tooltip)
             widgets[prop_name] = spin
 
             def on_spin_changed(s, pn=prop_name):
@@ -222,21 +231,36 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             row += 1
             return spin
 
-        add_file_row(_("Diffusion _Model:"), "diffusion-model", DEFAULT_DIFFUSION_MODEL)
-        add_file_row(_("_LLM:"), "llm", DEFAULT_LLM)
-        add_file_row(_("LLM _Vision:"), "llm-vision", DEFAULT_LLM_VISION)
-        add_file_row(_("_VAE:"), "vae", DEFAULT_VAE)
-        add_file_row(_("T5_X_XL:"), "t5xxl", "")
-        add_file_row(_("_T5:"), "t5", "")
-        add_file_row(_("LoR_A:"), "lora", "")
-        add_spin_row(_("_Width:"), "width", 1024, 64, 8192)
-        add_spin_row(_("_Height:"), "height", 1024, 64, 8192)
-        add_spin_row(_("_Steps:"), "steps", 8, 1, 100)
-        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 1.0, 0.0, 30.0)
-        add_spin_row_float(_("G_uida_nce:"), "guidance", 0.0, 0.0, 30.0)
-        add_file_row(_("Sig_mas:"), "sigmas", DEFAULT_SIGMAS)
-        add_file_row(_("VAE _Format:"), "vae-format", "auto")
-        add_file_row(_("_Prediction:"), "prediction", "")
+        add_file_row(_("Diffusion _Model:"), "diffusion-model", DEFAULT_DIFFUSION_MODEL,
+                     _("Diffusion model weights (GGUF) that generate the image; pick the checkpoint matching your desired style."))
+        add_file_row(_("_LLM:"), "llm", DEFAULT_LLM,
+                     _("Language model that reads and expands your prompt before generation."))
+        add_file_row(_("LLM _Vision:"), "llm-vision", DEFAULT_LLM_VISION,
+                     _("Vision projector (mmproj) that lets the LLM see reference images."))
+        add_file_row(_("_VAE:"), "vae", DEFAULT_VAE,
+                     _("VAE that decodes the model's latents into the final image; must match the diffusion model."))
+        add_file_row(_("T5_X_XL:"), "t5xxl", "",
+                     _("Optional T5-XXL text encoder used by some SD3/Flux-style models to read prompts."))
+        add_file_row(_("_T5:"), "t5", "",
+                     _("Optional T5 text encoder used by some models to embed the prompt."))
+        add_file_row(_("LoR_A:"), "lora", "",
+                     _("Optional LoRA adapter that adds a style or subject to the base model."))
+        add_spin_row(_("_Width:"), "width", 1024, 64, 8192,
+                     _("Output image width in pixels."))
+        add_spin_row(_("_Height:"), "height", 1024, 64, 8192,
+                     _("Output image height in pixels."))
+        add_spin_row(_("_Steps:"), "steps", 8, 1, 100,
+                     _("Number of denoising steps; more steps can improve quality but take longer."))
+        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 1.0, 0.0, 30.0,
+                           _("Classifier-free guidance strength for traditional CFG models; higher follows the prompt more strictly."))
+        add_spin_row_float(_("G_uida_nce:"), "guidance", 0.0, 0.0, 30.0,
+                           _("Distilled guidance scale for flow-matching models (e.g. Qwen/Flux); higher follows the prompt more closely."))
+        add_file_row(_("Sig_mas:"), "sigmas", DEFAULT_SIGMAS,
+                     _("Custom sigma schedule for distilled/turbo models; comma-separated values from 1.0 down to 0.0."))
+        add_file_row(_("VAE _Format:"), "vae-format", "auto",
+                     _("VAE latent layout override: auto, flux, sd3, flux2, or wan."))
+        add_file_row(_("_Prediction:"), "prediction", "",
+                     _("Override the model's prediction type (eps, v, sd3_flow, flux_flow); leave blank to auto-detect."))
 
         # Prompt: multi-line text view
         prompt_label = Gtk.Label.new_with_mnemonic(_("_Prompt:"))
@@ -262,6 +286,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
 
         text_view.get_buffer().connect("changed", on_text_changed)
         prompt_label.set_mnemonic_widget(text_view)
+        prompt_tooltip = _("Describe the image you want to generate.")
+        prompt_label.set_tooltip_text(prompt_tooltip)
+        text_view.set_tooltip_text(prompt_tooltip)
 
         # Ctrl+Enter submits the dialog
         def on_text_view_key(view, event, dlg):
@@ -596,6 +623,10 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             error_message = _("Failed to load the generated image file.")
             Gimp.message(error_message)
             return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(error_message))
+
+        layers = imported_image.get_layers()
+        if layers:
+            layers[0].set_name(_("AI Image"))
 
         Gimp.Display.new(imported_image)
 
