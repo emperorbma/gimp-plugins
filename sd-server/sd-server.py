@@ -173,6 +173,10 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             if stem:
                 model_info_label.set_text(_("Model: %s") % stem)
                 model_info_label.set_tooltip_text(stem)
+                if ("turbo" in stem.lower() and
+                        steps_spin.get_value_as_int() > 10):
+                    steps_spin.set_value(8)
+                    cfg_spin.set_value(1.0)
             else:
                 model_info_label.set_text(_("Connected"))
             query_spinner.stop()
