@@ -112,6 +112,36 @@ def paste_layer_aligned(image, target_layer, source_layer):
         image.remove_channel(saved_channel)
 
 
+def export_layer_png(image, layer, path):
+    """Render a single layer at its canvas position to a full-canvas PNG at
+    `path`. An active selection is temporarily cleared so only the layer's own
+    pixels are copied, then restored."""
+    width = image.get_width()
+    height = image.get_height()
+    tmp_img = Gimp.Image.new(width, height, Gimp.ImageBaseType.RGB)
+    tmp_layer = Gimp.Layer.new(tmp_img, layer.get_name(), width, height,
+                               Gimp.ImageType.RGBA_IMAGE, 100.0,
+                               Gimp.LayerMode.NORMAL)
+    tmp_img.insert_layer(tmp_layer, None, 0)
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    non_empty = result[1] if len(result) == 6 else result[0] if result else False
+    saved_channel = None
+    if non_empty:
+        saved_channel = selection.save(image)
+        Gimp.Selection.none(image)
+    Gimp.edit_copy([layer])
+    floating_sel = Gimp.edit_paste(tmp_layer, False)
+    if floating_sel:
+        Gimp.floating_sel_anchor(floating_sel[0])
+    if saved_channel is not None:
+        image.select_item(Gimp.ChannelOps.REPLACE, saved_channel)
+        image.remove_channel(saved_channel)
+    Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, tmp_img,
+                   Gio.File.new_for_path(str(path)), None)
+    Gimp.Image.delete(tmp_img)
+
+
 def sd_server_func(procedure, run_mode, image, drawables, config, data):
     if run_mode == Gimp.RunMode.INTERACTIVE:
         GimpUi.init(PLUGIN_NAME)
@@ -177,6 +207,7 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
                         steps_spin.get_value_as_int() > 10):
                     steps_spin.set_value(8)
                     cfg_spin.set_value(1.0)
+                _apply_multi_layer_defaults()
             else:
                 model_info_label.set_text(_("Connected"))
             query_spinner.stop()
@@ -215,7 +246,7 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
 
         # --- Generate new image checkbox ---
         generate_label = Gtk.CheckButton.new_with_mnemonic(
-            _("Generate new image (no layer or checked)")
+            _("Generate new image (text2img)")
         )
         generate_label.set_halign(Gtk.Align.START)
         generate_label.set_valign(Gtk.Align.CENTER)
@@ -247,6 +278,96 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
 
         use_selection_check.connect("toggled", on_use_selection_changed)
         grid.attach(use_selection_check, 0, row, 2, 1)
+        row += 1
+
+        # --- Multi-layer edit ---
+        layer_rows = []
+        ref_scrolled = Gtk.ScrolledWindow()
+        ref_scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        ref_scrolled.set_hexpand(True)
+        ref_scrolled.set_vexpand(True)
+        ref_scrolled.set_min_content_height(120)
+
+        ref_list = Gtk.ListBox()
+        ref_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        ref_scrolled.add(ref_list)
+
+        def _update_ref_numbers():
+            idx = 0
+            for _lid, _check, _num_label in layer_rows:
+                if _check.get_active():
+                    idx += 1
+                    _num_label.set_text(_("image %d:") % idx)
+                else:
+                    _num_label.set_text("")
+            return idx
+
+        if image is not None:
+            target_id = drawables[0].get_id() if drawables else None
+            for layer in image.get_layers():
+                row_widget = Gtk.ListBoxRow()
+                hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                               spacing=6)
+                check = Gtk.CheckButton()
+                check.set_active(layer.get_id() == target_id)
+                check.set_sensitive(layer.get_id() != target_id)
+                check.set_tooltip_text(_("Include this layer as a reference image"))
+                num_label = Gtk.Label(label="")
+                num_label.set_width_chars(9)
+                num_label.set_halign(Gtk.Align.START)
+                name_label = Gtk.Label(label=layer.get_name())
+                name_label.set_halign(Gtk.Align.START)
+                name_label.set_hexpand(True)
+                hbox.pack_start(check, False, False, 0)
+                hbox.pack_start(num_label, False, False, 0)
+                hbox.pack_start(name_label, True, True, 0)
+                row_widget.add(hbox)
+                ref_list.add(row_widget)
+                check.connect("toggled",
+                              lambda *a: _update_ref_numbers())
+                layer_rows.append((layer.get_id(), check, num_label))
+
+        multi_layer_hint = Gtk.Label(label="")
+        multi_layer_hint.set_halign(Gtk.Align.START)
+        multi_layer_hint.set_hexpand(True)
+        multi_layer_hint.set_line_wrap(True)
+        multi_defaults_ready = [False]
+
+        multi_layer_check = Gtk.CheckButton.new_with_mnemonic(
+            _("Multi-layer e_dit (send layers as image 1, image 2, ...)")
+        )
+        multi_layer_check.set_halign(Gtk.Align.START)
+        multi_layer_check.set_valign(Gtk.Align.CENTER)
+        multi_layer_check.set_tooltip_text(_("Send individual layers to the server as separate reference images. In the prompt, refer to each checked layer positionally as image 1, image 2, etc. The layer being edited is always included. Checked layers appear in layer-stack order."))
+
+        def _apply_multi_layer_defaults():
+            if not multi_defaults_ready[0]:
+                return
+            if multi_layer_check.get_active():
+                if denoise_spin.get_value() <= 0.8:
+                    denoise_spin.set_value(1.0)
+                if cfg_spin.get_value() <= 1.5:
+                    cfg_spin.set_value(7.0)
+                multi_layer_hint.set_text(_("Init Strength ~0.9 and Guidance > 1.0 recommended."))
+            else:
+                multi_layer_hint.set_text("")
+
+        def on_multi_layer_changed(cb):
+            config.set_property("multi-layer", cb.get_active())
+            ref_scrolled.set_sensitive(cb.get_active())
+            _apply_multi_layer_defaults()
+
+        multi_layer_check.connect("toggled", on_multi_layer_changed)
+        multi_layer_check.set_active(
+            config.get_property("multi-layer") or False
+        )
+        _update_ref_numbers()
+        ref_scrolled.set_sensitive(multi_layer_check.get_active())
+        grid.attach(multi_layer_check, 0, row, 2, 1)
+        row += 1
+        grid.attach(ref_scrolled, 0, row, 2, 1)
+        row += 1
+        grid.attach(multi_layer_hint, 0, row, 2, 1)
         row += 1
 
         # --- Width ---
@@ -494,8 +615,14 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
         grid.attach(neg_scrolled, 1, row, 1, 1)
         row += 1
 
+        multi_defaults_ready[0] = True
+        _apply_multi_layer_defaults()
         dialog.show_all()
         response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            selected_ids = [str(lid) for lid, check, _nl in layer_rows
+                            if check.get_active()]
+            config.set_property("ref-layers", ",".join(selected_ids))
         dialog.destroy()
         # gtk_widget_destroy() only queues the teardown; flush it so the dead
         # window does not linger (as "not responding") while the server runs.
@@ -608,6 +735,15 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
     seed = config.get_property("seed")
     sampler = config.get_property("sampler-name") or "euler"
 
+    multi_layer = config.get_property("multi-layer") or False
+    if multi_layer:
+        # Placing objects into a scene needs near-full denoising and enough
+        # guidance to follow the instruction instead of merging the layers.
+        if denoising < 0.85:
+            denoising = 1.0
+        if cfg_scale <= 1.5:
+            cfg_scale = 7.0
+
     Gimp.context_push()
     image.undo_group_start()
 
@@ -674,12 +810,38 @@ def _edit_layer(procedure, run_mode, image, drawables, config):
                 mask_path = None
 
         # Vision edit models (Boogu, Qwen, Longcat) and Kontext/ref models
-        # need extra_images for reference conditioning.
+        # need extra_images for reference conditioning. When multi-layer edit
+        # is enabled, send each selected layer as its own reference image so
+        # the prompt can refer to them positionally (image 1, 2, ...).
+        extra_images = [img_b64]
+        if (multi_layer and
+                (is_vision_edit or is_kontext or supports_ref)):
+            ref_ids = config.get_property("ref-layers") or ""
+            layers_by_id = {layer.get_id(): layer
+                            for layer in image.get_layers()}
+            ref_layers = []
+            for sid in ref_ids.split(","):
+                sid = sid.strip()
+                if sid.isdigit() and int(sid) in layers_by_id:
+                    ref_layers.append(layers_by_id[int(sid)])
+            if ref_layers:
+                extra_images = []
+                for i, layer in enumerate(ref_layers):
+                    ref_path = temp_dir / (
+                        f"gimp_sdserver_ref_{os.getpid()}_{i}.png"
+                    )
+                    export_layer_png(image, layer, ref_path)
+                    with open(ref_path, "rb") as f:
+                        extra_images.append(
+                            base64.b64encode(f.read()).decode("utf-8")
+                        )
+                    ref_path.unlink(missing_ok=True)
+
         if is_vision_edit or is_kontext or supports_ref:
             payload = {
                 "prompt": prompt,
                 "init_images": [img_b64],
-                "extra_images": [img_b64],
+                "extra_images": extra_images,
                 "denoising_strength": denoising,
                 "steps": steps,
                 "cfg_scale": cfg_scale,
@@ -838,6 +1000,18 @@ class SDServer(Gimp.PlugIn):
             "use-selection", _("Use _selection as mask"),
             _("Restrict edits to the current selection (inpaint)"),
             True, GObject.ParamFlags.READWRITE,
+        )
+        # Multi-layer edit flag (edit mode)
+        procedure.add_boolean_argument(
+            "multi-layer", _("Multi-layer _edit"),
+            _("Send selected layers as separate reference images"),
+            False, GObject.ParamFlags.READWRITE,
+        )
+        # Reference layer IDs (comma-separated, edit mode)
+        procedure.add_string_argument(
+            "ref-layers", _("Reference layers"),
+            _("Comma-separated layer IDs used as reference images"),
+            "", GObject.ParamFlags.READWRITE,
         )
         # Width
         procedure.add_int_argument(
