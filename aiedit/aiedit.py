@@ -261,51 +261,54 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
             row += 1
             return entry
 
-        def add_spin_row(label_text, prop_name, default, min_val, max_val, tooltip):
+        def add_combined_row(pairs):
             nonlocal row
-            label = Gtk.Label.new_with_mnemonic(label_text)
-            label.set_halign(Gtk.Align.START)
-            label.set_hexpand(False)
-            adjustment = Gtk.Adjustment(value=default, lower=min_val,
-                                        upper=max_val, step_increment=1, page_increment=64)
-            spin = Gtk.SpinButton(adjustment=adjustment)
-            spin.set_tooltip_text(tooltip)
-            spin.set_hexpand(True)
-            spin.set_valign(Gtk.Align.CENTER)
-            label.set_mnemonic_widget(spin)
-            widgets[prop_name] = spin
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            for (label_text, prop_name, kind, default,
+                 min_val, max_val, tooltip) in pairs:
+                label = Gtk.Label.new_with_mnemonic(label_text)
+                label.set_halign(Gtk.Align.START)
+                label.set_hexpand(False)
+                if kind == "int":
+                    adjustment = Gtk.Adjustment(
+                        value=default, lower=min_val, upper=max_val,
+                        step_increment=1, page_increment=64)
+                    widget = Gtk.SpinButton(adjustment=adjustment)
+                    widget.set_valign(Gtk.Align.CENTER)
+                    widgets[prop_name] = widget
 
-            def on_spin_changed(s, pn=prop_name):
-                config.set_property(pn, s.get_value_as_int())
+                    def on_changed(s, pn=prop_name):
+                        config.set_property(pn, s.get_value_as_int())
 
-            spin.connect("value-changed", on_spin_changed)
-            grid.attach(label, 0, row, 1, 1)
-            grid.attach(spin, 1, row, 1, 1)
+                    widget.connect("value-changed", on_changed)
+                elif kind == "float":
+                    adjustment = Gtk.Adjustment(
+                        value=default, lower=min_val, upper=max_val,
+                        step_increment=0.1, page_increment=10)
+                    widget = Gtk.SpinButton(adjustment=adjustment, digits=1)
+                    widget.set_valign(Gtk.Align.CENTER)
+                    widgets[prop_name] = widget
+
+                    def on_changed(s, pn=prop_name):
+                        config.set_property(pn, s.get_value())
+
+                    widget.connect("value-changed", on_changed)
+                else:
+                    widget = Gtk.Entry()
+                    widget.set_text(config.get_property(prop_name) or default)
+                    widget.set_valign(Gtk.Align.CENTER)
+                    widgets[prop_name] = widget
+
+                    def on_changed(e, pn=prop_name):
+                        config.set_property(pn, e.get_text())
+
+                    widget.connect("changed", on_changed)
+                widget.set_tooltip_text(tooltip)
+                label.set_mnemonic_widget(widget)
+                hbox.pack_start(label, False, False, 0)
+                hbox.pack_start(widget, False, False, 0)
+            grid.attach(hbox, 0, row, 2, 1)
             row += 1
-            return spin
-
-        def add_spin_row_float(label_text, prop_name, default, min_val, max_val, tooltip):
-            nonlocal row
-            label = Gtk.Label.new_with_mnemonic(label_text)
-            label.set_halign(Gtk.Align.START)
-            label.set_hexpand(False)
-            adjustment = Gtk.Adjustment(value=default, lower=min_val,
-                                        upper=max_val, step_increment=0.1, page_increment=10)
-            spin = Gtk.SpinButton(adjustment=adjustment, digits=1)
-            spin.set_tooltip_text(tooltip)
-            spin.set_hexpand(True)
-            spin.set_valign(Gtk.Align.CENTER)
-            label.set_mnemonic_widget(spin)
-            widgets[prop_name] = spin
-
-            def on_spin_changed(s, pn=prop_name):
-                config.set_property(pn, s.get_value())
-
-            spin.connect("value-changed", on_spin_changed)
-            grid.attach(label, 0, row, 1, 1)
-            grid.attach(spin, 1, row, 1, 1)
-            row += 1
-            return spin
 
         add_file_row(_("Diffusion _Model:"), "diffusion-model", DEFAULT_DIFFUSION_MODEL,
                      _("Path to the diffusion model GGUF file"))
@@ -325,16 +328,16 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                      _("Path to a LoRA adapter file to apply (optional)"))
         add_file_row(_("Control-_Net:"), "control-net", "",
                      _("Path to a ControlNet model for guided generation (optional)"))
-        add_spin_row(_("_Steps:"), "steps", 8, 1, 100,
-                     _("Number of sampling steps — higher values improve quality but take longer"))
-        add_spin_row_float(_("CFG S_cale:"), "cfg-scale", 1.0, 0.0, 30.0,
-                           _("How strongly to follow the prompt (1=creative, ~30=strict)"))
-        add_spin_row_float(_("G_uida_nce:"), "guidance", 0.0, 0.0, 30.0,
-                           _("Distilled guidance for flow-matching models like Flux (0=disabled)"))
+        add_combined_row([
+            (_("_Steps:"), "steps", "int", 8, 1, 100,
+             _("Number of sampling steps — higher values improve quality but take longer")),
+            (_("CFG S_cale:"), "cfg-scale", "float", 1.0, 0.0, 30.0,
+             _("How strongly to follow the prompt (1=creative, ~30=strict)")),
+            (_("G_uida_nce:"), "guidance", "float", 0.0, 0.0, 30.0,
+             _("Distilled guidance for flow-matching models like Flux (0=disabled)")),
+        ])
         add_file_row(_("Sig_mas:"), "sigmas", DEFAULT_SIGMAS,
                      _("Custom sigma schedule (comma-separated values from 1.0 to 0.0) for distilled/turbo models — leave empty to use the model default"))
-        add_file_row(_("VAE _Format:"), "vae-format", "auto",
-                     _("VAE latent format: auto, flux, sd3, flux2, wan"))
         add_file_row(_("_Prediction:"), "prediction", "",
                      _("Prediction type override: eps, v, sd3_flow, flux_flow (leave empty for auto-detect)"))
 
@@ -383,11 +386,14 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         grid.attach(use_selection_check, 0, row, 2, 1)
         row += 1
 
-        add_spin_row(_("_Seed:"), "seed", -1, -1, 2147483647,
-                     _("Random seed (-1 for random) — use the same seed to reproduce results"))
-
-        add_spin_row_float(_("_Strength:"), "strength", 0.75, 0.0, 1.0,
-                           _("How much to transform the image — 0=unchanged, 1=fully replaced"))
+        add_combined_row([
+            (_("_Seed:"), "seed", "int", -1, -1, 2147483647,
+             _("Random seed (-1 for random) — use the same seed to reproduce results")),
+            (_("_Strength:"), "strength", "float", 0.75, 0.0, 1.0,
+             _("How much to transform the image — 0=unchanged, 1=fully replaced")),
+            (_("VAE _Format:"), "vae-format", "text", "auto", 0, 0,
+             _("VAE latent format: auto, flux, sd3, flux2, wan")),
+        ])
 
         # Prompt: multi-line text view
         prompt_label = Gtk.Label.new_with_mnemonic(_("_Prompt:"))

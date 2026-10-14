@@ -370,7 +370,9 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
         grid.attach(multi_layer_hint, 0, row, 2, 1)
         row += 1
 
-        # --- Width ---
+        # --- Width / Height (same line) ---
+        width_height_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
         width_label = Gtk.Label.new_with_mnemonic(_("_Width:"))
         width_label.set_halign(Gtk.Align.START)
         width_label.set_hexpand(False)
@@ -379,7 +381,6 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             lower=64, upper=8192, step_increment=64, page_increment=64
         )
         width_spin = Gtk.SpinButton(adjustment=width_adj)
-        width_spin.set_hexpand(True)
         width_spin.set_valign(Gtk.Align.CENTER)
         width_spin.set_tooltip_text(_("Output image width in pixels (64–8192)"))
         width_label.set_mnemonic_widget(width_spin)
@@ -388,20 +389,17 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             config.set_property("width", s.get_value_as_int())
 
         width_spin.connect("value-changed", on_width_changed)
-        grid.attach(width_label, 0, row, 1, 1)
-        grid.attach(width_spin, 1, row, 1, 1)
-        row += 1
+        width_height_hbox.pack_start(width_label, False, False, 0)
+        width_height_hbox.pack_start(width_spin, False, False, 0)
 
-        # --- Height ---
         height_label = Gtk.Label.new_with_mnemonic(_("_Height:"))
         height_label.set_halign(Gtk.Align.START)
-        height_label.set_hexpand(False)
+        height_label.set_hexpand(True)
         height_adj = Gtk.Adjustment(
             value=config.get_property("height") or 1024,
             lower=64, upper=8192, step_increment=64, page_increment=64
         )
         height_spin = Gtk.SpinButton(adjustment=height_adj)
-        height_spin.set_hexpand(True)
         height_spin.set_valign(Gtk.Align.CENTER)
         height_spin.set_tooltip_text(_("Output image height in pixels (64–8192)"))
         height_label.set_mnemonic_widget(height_spin)
@@ -410,11 +408,15 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             config.set_property("height", s.get_value_as_int())
 
         height_spin.connect("value-changed", on_height_changed)
-        grid.attach(height_label, 0, row, 1, 1)
-        grid.attach(height_spin, 1, row, 1, 1)
+        width_height_hbox.pack_start(height_label, False, False, 0)
+        width_height_hbox.pack_start(height_spin, False, False, 0)
+
+        grid.attach(width_height_hbox, 0, row, 2, 1)
         row += 1
 
-        # --- Steps ---
+        # --- Steps / Guidance (same line) ---
+        steps_guidance_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
         steps_label = Gtk.Label.new_with_mnemonic(_("_Steps:"))
         steps_label.set_halign(Gtk.Align.START)
         steps_label.set_hexpand(False)
@@ -423,7 +425,6 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             lower=1, upper=100, step_increment=1, page_increment=10
         )
         steps_spin = Gtk.SpinButton(adjustment=steps_adj)
-        steps_spin.set_hexpand(True)
         steps_spin.set_valign(Gtk.Align.CENTER)
         steps_spin.set_tooltip_text(_("Number of sampling steps — higher values generally improve quality but take longer (1–100)"))
         steps_label.set_mnemonic_widget(steps_spin)
@@ -432,20 +433,17 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             config.set_property("steps", s.get_value_as_int())
 
         steps_spin.connect("value-changed", on_steps_changed)
-        grid.attach(steps_label, 0, row, 1, 1)
-        grid.attach(steps_spin, 1, row, 1, 1)
-        row += 1
+        steps_guidance_hbox.pack_start(steps_label, False, False, 0)
+        steps_guidance_hbox.pack_start(steps_spin, False, False, 0)
 
-        # --- CFG Scale ---
         cfg_label = Gtk.Label.new_with_mnemonic(_("_Guidance:"))
         cfg_label.set_halign(Gtk.Align.START)
-        cfg_label.set_hexpand(False)
+        cfg_label.set_hexpand(True)
         cfg_adj = Gtk.Adjustment(
             value=config.get_property("cfg-scale") or 7.0,
             lower=1.0, upper=30.0, step_increment=0.5, page_increment=5
         )
         cfg_spin = Gtk.SpinButton(adjustment=cfg_adj, digits=1)
-        cfg_spin.set_hexpand(True)
         cfg_spin.set_valign(Gtk.Align.CENTER)
         cfg_spin.set_tooltip_text(_("cfg_scale — how strongly the prompt is followed (1=creative, ~30=strict)"))
         cfg_label.set_mnemonic_widget(cfg_spin)
@@ -454,11 +452,15 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             config.set_property("cfg-scale", s.get_value())
 
         cfg_spin.connect("value-changed", on_cfg_changed)
-        grid.attach(cfg_label, 0, row, 1, 1)
-        grid.attach(cfg_spin, 1, row, 1, 1)
+        steps_guidance_hbox.pack_start(cfg_label, False, False, 0)
+        steps_guidance_hbox.pack_start(cfg_spin, False, False, 0)
+
+        grid.attach(steps_guidance_hbox, 0, row, 2, 1)
         row += 1
 
-        # --- Seed ---
+        # --- Seed / Init Strength (same line) ---
+        seed_denoise_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
         seed_label = Gtk.Label.new_with_mnemonic(_("_Seed:"))
         seed_label.set_halign(Gtk.Align.START)
         seed_label.set_hexpand(False)
@@ -467,7 +469,6 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             lower=-1, upper=2147483647, step_increment=1, page_increment=64
         )
         seed_spin = Gtk.SpinButton(adjustment=seed_adj)
-        seed_spin.set_hexpand(True)
         seed_spin.set_valign(Gtk.Align.CENTER)
         seed_spin.set_tooltip_text(_("RNG seed (-1 for random) — use the same seed to reproduce results"))
         seed_label.set_mnemonic_widget(seed_spin)
@@ -476,20 +477,17 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             config.set_property("seed", s.get_value_as_int())
 
         seed_spin.connect("value-changed", on_seed_changed)
-        grid.attach(seed_label, 0, row, 1, 1)
-        grid.attach(seed_spin, 1, row, 1, 1)
-        row += 1
+        seed_denoise_hbox.pack_start(seed_label, False, False, 0)
+        seed_denoise_hbox.pack_start(seed_spin, False, False, 0)
 
-        # --- Denoising Strength ---
         denoise_label = Gtk.Label.new_with_mnemonic(_("_Init Strength:"))
         denoise_label.set_halign(Gtk.Align.START)
-        denoise_label.set_hexpand(False)
+        denoise_label.set_hexpand(True)
         denoise_adj = Gtk.Adjustment(
             value=config.get_property("denoising-strength") or 0.75,
             lower=0.0, upper=1.0, step_increment=0.05, page_increment=0.1
         )
         denoise_spin = Gtk.SpinButton(adjustment=denoise_adj, digits=2)
-        denoise_spin.set_hexpand(True)
         denoise_spin.set_valign(Gtk.Align.CENTER)
         denoise_spin.set_tooltip_text(_("denoising_strength — how much the original image is altered (0=unchanged, 1=fully replaced)"))
         denoise_label.set_mnemonic_widget(denoise_spin)
@@ -498,8 +496,10 @@ def sd_server_func(procedure, run_mode, image, drawables, config, data):
             config.set_property("denoising-strength", s.get_value())
 
         denoise_spin.connect("value-changed", on_denoise_changed)
-        grid.attach(denoise_label, 0, row, 1, 1)
-        grid.attach(denoise_spin, 1, row, 1, 1)
+        seed_denoise_hbox.pack_start(denoise_label, False, False, 0)
+        seed_denoise_hbox.pack_start(denoise_spin, False, False, 0)
+
+        grid.attach(seed_denoise_hbox, 0, row, 2, 1)
         row += 1
 
         # --- Sampler ---
