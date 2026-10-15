@@ -53,9 +53,11 @@ PLUGIN_DEPS = {
         "cmd": "sd-cli binary (see https://github.com/leejet/stable-diffusion.cpp)",
     },
     "depthmap": {
-        "pip": ["depth-anything-v2", "torch", "pillow"],
+        "pip": ["depth-anything-v2", "torch", "torchvision", "pillow",
+                "opencv-python", "matplotlib"],
         "cli": [],
-        "cmd": "pip install --user depth-anything-v2 torch pillow",
+        "cmd": "pip install --user --no-deps depth-anything-v2 "
+               "torch torchvision pillow opencv-python matplotlib",
     },
     "sd-server": {
         "pip": ["requests"],
