@@ -10,6 +10,7 @@ A collection of Python-based AI plugins for **GIMP 3** (GNU Image Manipulation P
 |--------|-------------|--------------|--------------|
 | **Background Remove** (`bgremove/`) | Removes backgrounds from images using AI | Exports layer → runs `backgroundremover` CLI → imports result as new transparent layer | `backgroundremover` (PyPI) |
 | **AI Upscale** (`upscale/`) | Upscales images 4× using AI upscalers | Exports layer → runs PyTorch upscaler (3 backends) → imports result as new upscaled layer | `torch`, `pillow`, `image_gen_aux` / `diffusers` |
+| **Depth Map** (`depthmap/`) | Creates a depth map layer from the active layer | Exports layer → runs Depth Anything V2 in-process (Small / Base / Large) → imports result as new depth layer; optional Facebook 3D photo export | `depth-anything-v2`, `torch`, `torchvision`, `opencv-python`, `matplotlib` |
 | **AI Edit** (`aiedit/`) | Edits images using text prompts via a diffusion model and vision LLM | Exports layer → runs `sd-cli` with a diffusion GGUF model + vision LLM → imports edited result as new layer | `sd-cli` (stable-diffusion.cpp), diffusion GGUF, vision LLM GGUF, VAE |
 | **SD Server** (`sd-server/`) | Generates/edits images via stable-diffusion.cpp server API | Connects to `sd-server` HTTP API; supports txt2img, img2img, and Kontext/Boogu-style reference editing | `sd-server` (stable-diffusion.cpp), `requests` |
 
@@ -58,6 +59,10 @@ pip install image_gen_aux diffusers torch pillow
 
 # For SD Server
 pip install requests
+
+# For Depth Map
+pip install --no-deps depth-anything-v2 torch pillow
+pip install opencv-python matplotlib  # only if not already installed
 ```
 
 ### 2. Place plugins in GIMP's plug-ins directory
@@ -147,6 +152,16 @@ It is not necessary to edit `upscale/upscale.py` to:
 - Add new upscaling models with appropriate config
 - Tune inference parameters (tile_size, steps, noise_level, etc.)
 ...but you can!
+
+### Depth Map
+
+The Depth Map plugin creates a depth map layer (white = near, black = far) from the active layer using [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), running in-process like `upscale`. Find it under Filters -> AI.
+
+**Requirements.** `pip install --no-deps depth-anything-v2 torch pillow` plus `opencv-python` and `matplotlib`. Install with `--no-deps` because the package pins an old `torchvision` combo. A checkpoint (`depth_anything_v2_vit[sbl].pth`) is also needed; the Small (~98 MB), Base (~390 MB), and Large (~1.3 GB) variants match three model sizes, with the model cache avoiding reloads between runs. GPU (CUDA) is used when available, with a CPU fallback.
+
+**It works automatically.** Just pick a variant and output (grayscale, colored inferno, or both) in the dialog and click OK. The plugin locates an existing checkpoint via `locate` and common model directories (`~/models`, `~/Downloads`, `~/Downloads/src/ComfyUI/models`, `/opt/models`), or auto-downloads the chosen variant into `~/.cache/gimp-depthmap/`. It resolves a usable model in this order: explicit path in the dialog → discovered checkpoint on disk → download. Alternatively, tick **Export as 3D photo (Facebook)** to also write `<name>.jpg` plus `<name>_depth.jpg` for upload to Facebook.
+
+**Troubleshooting.** First run can take a while because the checkpoint downloads. If nothing is found, disable **Download if missing** and enter the checkpoint path directly, or fetch one manually with `hf download depth-anything/Depth-Anything-V2-Small --local-dir ~/.cache/gimp-depthmap`. Depth Anything V1 checkpoints (`depth_anything_vitl14.pth`) are not supported. If a model file is missing the plugin says so; install errors usually mean `depth-anything-v2` was installed with its pinned old `torchvision`. If the 3D photo parallax looks inverted, rerun with **Invert (for lens blur)**.
 
 ### AI Image
 
