@@ -236,6 +236,56 @@ def infer_depth(model, pil_image, max_side):
     return gray, colored
 
 
+def paste_layer_aligned(image, target_layer, source_layer):
+    """Copy `source_layer`'s pixels into `target_layer`, aligned to the target
+    layer origin. An active selection is temporarily cleared so the marching
+    ants cannot shift the pasted content, then restored."""
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    non_empty = result[1] if len(result) == 6 else result[0] if result else False
+    saved_channel = None
+    if non_empty:
+        saved_channel = selection.save(image)
+        Gimp.Selection.none(image)
+    Gimp.edit_copy([source_layer])
+    floating_sel = Gimp.edit_paste(target_layer, False)
+    if floating_sel:
+        Gimp.floating_sel_anchor(floating_sel[0])
+    if saved_channel is not None:
+        image.select_item(Gimp.ChannelOps.REPLACE, saved_channel)
+        image.remove_channel(saved_channel)
+
+
+def export_layer_png(image, layer, path):
+    """Render a single layer at its canvas position to a full-canvas PNG at
+    `path`. An active selection is temporarily cleared so only the layer's own
+    pixels are copied, then restored."""
+    width = image.get_width()
+    height = image.get_height()
+    tmp_img = Gimp.Image.new(width, height, Gimp.ImageBaseType.RGB)
+    tmp_layer = Gimp.Layer.new(tmp_img, layer.get_name(), width, height,
+                               Gimp.ImageType.RGBA_IMAGE, 100.0,
+                               Gimp.LayerMode.NORMAL)
+    tmp_img.insert_layer(tmp_layer, None, 0)
+    selection = image.get_selection()
+    result = selection.bounds(image)
+    non_empty = result[1] if len(result) == 6 else result[0] if result else False
+    saved_channel = None
+    if non_empty:
+        saved_channel = selection.save(image)
+        Gimp.Selection.none(image)
+    Gimp.edit_copy([layer])
+    floating_sel = Gimp.edit_paste(tmp_layer, False)
+    if floating_sel:
+        Gimp.floating_sel_anchor(floating_sel[0])
+    if saved_channel is not None:
+        image.select_item(Gimp.ChannelOps.REPLACE, saved_channel)
+        image.remove_channel(saved_channel)
+    Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, tmp_img,
+                   Gio.File.new_for_path(str(path)), None)
+    Gimp.Image.delete(tmp_img)
+
+
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
     return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
                                        GLib.Error(_("Not implemented yet.")))
