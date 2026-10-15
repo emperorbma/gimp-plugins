@@ -286,9 +286,124 @@ def export_layer_png(image, layer, path):
     Gimp.Image.delete(tmp_img)
 
 
+def resolve_model(variant, explicit, download, cache):
+    """Explicit path > discovered checkpoint > download. Raises RuntimeError
+    with a helpful message when nothing resolves."""
+    if explicit:
+        p = Path(explicit)
+        if not p.is_file():
+            raise RuntimeError(_("Model file not found: %s") % explicit)
+        return p
+    found = find_depth_models()
+    if found.get(variant):
+        return found[variant][0]
+    if download:
+        try:
+            return download_model(variant, cache, progress=None)
+        except Exception as e:
+            raise RuntimeError(
+                _("Failed to download %s from %s into %s: %s")
+                % (CHECKPOINTS[variant], download_url(variant), cache, e))
+    raise RuntimeError(
+        _("No %s checkpoint found. Enable download or set the model file path.") % CHECKPOINTS[variant])
+
+
+def make_depth_layer(image, drawable, png_path, layer_name):
+    """Load a depth PNG and insert it as a new canvas-sized layer above
+    `drawable`. Returns the new layer."""
+    imported = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE,
+                              Gio.File.new_for_path(str(png_path)))
+    if not imported:
+        raise RuntimeError(_("Failed to load the depth map file."))
+    source = imported.get_layers()[0]
+    layer = Gimp.Layer.new(image, layer_name,
+                           image.get_width(), image.get_height(),
+                           Gimp.ImageType.RGBA_IMAGE, 100.0,
+                           Gimp.LayerMode.NORMAL)
+    image.insert_layer(layer, drawable.get_parent(),
+                       image.get_item_position(drawable) + 1)
+    paste_layer_aligned(image, layer, source)
+    Gimp.Image.delete(imported)
+    image.active_layer = layer
+    return layer
+
+
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
-    return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
-                                       GLib.Error(_("Not implemented yet.")))
+    if run_mode == Gimp.RunMode.INTERACTIVE:
+        GimpUi.init(PLUGIN_NAME)
+        dialog = GimpUi.ProcedureDialog.new(procedure, config, _("Depth Map"))
+        dialog.fill(None)
+        response = dialog.run()
+        # Tear the dialog down so it does not linger while inference runs.
+        display = dialog.get_display()
+        dialog.destroy()
+        if display is not None:
+            display.flush()
+        if not response:
+            return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+    Gimp.context_push()
+    image.undo_group_start()
+
+    if not drawables:
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
+                                           GLib.Error(_("No drawable provided.")))
+
+    input_path = None
+    output_gray = None
+    output_color = None
+    try:
+        temp_dir = Path(tempfile.gettempdir())
+        input_path = temp_dir / f"gimp_depthmap_input_{os.getpid()}.png"
+        output_gray = temp_dir / f"gimp_depthmap_output_gray_{os.getpid()}.png"
+        output_color = temp_dir / f"gimp_depthmap_output_color_{os.getpid()}.png"
+
+        from PIL import Image as PILImage
+
+        Gimp.progress_init(_("Saving layer for depth estimation..."))
+        export_layer_png(image, drawables[0], input_path)
+
+        variant = config.get_property("variant")
+        explicit = config.get_property("model_path").strip()
+        do_download = config.get_property("download_if_missing")
+        output_mode = config.get_property("output")
+        max_side = config.get_property("max_side")
+
+        Gimp.progress_set_text(_("Resolving depth model..."))
+        Gimp.progress_pulse()
+        model_path = resolve_model(variant, explicit, do_download, cache_dir())
+
+        Gimp.progress_set_text(_("Estimating depth (this may take time)..."))
+        Gimp.progress_pulse()
+        pil_image = PILImage.open(str(input_path)).convert("RGB")
+        model = get_model(model_path, variant)
+        depth, colored = infer_depth(model, pil_image, max_side)
+
+        PILImage.fromarray(depth).save(str(output_gray), "PNG")
+        if output_mode in ("colored", "both"):
+            PILImage.fromarray(colored).save(str(output_color), "PNG")
+
+        Gimp.progress_set_text(_("Loading depth layer..."))
+        Gimp.progress_pulse()
+
+        drawable = drawables[0]
+        make_depth_layer(image, drawable, output_gray, _("Depth (grayscale)"))
+        if output_mode in ("colored", "both"):
+            make_depth_layer(image, drawable, output_color, _("Depth (colored)"))
+
+        Gimp.displays_flush()
+    except Exception as e:
+        Gimp.message(_("An unexpected error occurred: %s") % e)
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
+                                           GLib.Error(str(e)))
+    finally:
+        for p in (input_path, output_gray, output_color):
+            if p is not None and p.exists():
+                os.remove(p)
+
+    image.undo_group_end()
+    Gimp.context_pop()
+    return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
 
 
 class DepthMap (Gimp.PlugIn):
@@ -318,6 +433,47 @@ class DepthMap (Gimp.PlugIn):
                                   "Plugin Author",
                                   "2026")
         procedure.add_menu_path("<Image>/Filters/AI/")
+
+        # Variant dropdown
+        variant_choice = Gimp.Choice.new()
+        for i, key in enumerate(MODEL_CONFIGS):
+            variant_choice.add(key, i, key, VARIANT_LABELS[key])
+        procedure.add_choice_argument(
+            "variant", _("_Variant"), _("Depth Anything V2 model size"),
+            variant_choice, "vits", GObject.ParamFlags.READWRITE,
+        )
+
+        # Optional explicit checkpoint path
+        procedure.add_string_argument(
+            "model_path", _("_Model file"),
+            _("Optional path to a .pth checkpoint (overrides discovery)"),
+            "", GObject.ParamFlags.READWRITE,
+        )
+
+        # Auto-download toggle
+        procedure.add_boolean_argument(
+            "download_if_missing", _("_Download if missing"),
+            _("Fetch the checkpoint from Hugging Face when not found on disk"),
+            True, GObject.ParamFlags.READWRITE,
+        )
+
+        # Output mode
+        output_choice = Gimp.Choice.new()
+        output_choice.add("grayscale", 0, "grayscale", _("Grayscale"))
+        output_choice.add("colored", 1, "colored", _("Colored (inferno)"))
+        output_choice.add("both", 2, "both", _("Both"))
+        procedure.add_choice_argument(
+            "output", _("_Output"), _("Depth layer contents"),
+            output_choice, "grayscale", GObject.ParamFlags.READWRITE,
+        )
+
+        # Inference resolution
+        procedure.add_int_argument(
+            "max_side", _("_Max side (px)"),
+            _("Larger side of the inference resolution; higher = better detail, slower"),
+            1024, 256, 4096, GObject.ParamFlags.READWRITE,
+        )
+
         return procedure
 
 
