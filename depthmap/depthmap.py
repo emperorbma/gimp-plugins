@@ -475,7 +475,7 @@ class DepthMap (Gimp.PlugIn):
         procedure.add_int_argument(
             "max_side", _("_Max side (px)"),
             _("Larger side of the inference resolution; higher = better detail, slower"),
-            1024, 256, 4096, GObject.ParamFlags.READWRITE,
+            256, 4096, 1024, GObject.ParamFlags.READWRITE,
         )
 
         return procedure
