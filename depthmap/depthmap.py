@@ -17,7 +17,9 @@
 import os
 import re
 import sys
+import json
 import tempfile
+import threading
 from pathlib import Path
 import locale
 import gettext
@@ -93,6 +95,48 @@ def cache_dir():
     if base:
         return Path(base) / 'gimp-depthmap'
     return Path.home() / '.cache' / 'gimp-depthmap'
+
+
+CONFIG_DIR = Path(os.path.join(os.environ.get('HOME', str(Path.home())),
+                               '.config', 'gimp-plugins', 'depthmap'))
+CONFIG_FILE = CONFIG_DIR / 'config.json'
+
+
+def load_saved():
+    """Load previously saved dialog settings and discovered checkpoint
+    paths. Returns a dict that is always missing at least the keys it does
+    not know about."""
+    default = {
+        "variant": "vits",
+        "model_path": "",
+        "download_if_missing": True,
+        "output": "grayscale",
+        "max_side": 1024,
+        "invert": False,
+        "discovered": {},
+    }
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return default
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+    merged = dict(default)
+    merged.update({k: v for k, v in data.items() if k in default})
+    if not isinstance(merged["discovered"], dict):
+        merged["discovered"] = {}
+    return merged
+
+
+def save_config(cfg):
+    """Persist dialog settings and discovered model paths to disk."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def _candidate_dirs():
@@ -342,13 +386,18 @@ def make_depth_layer(image, drawable, png_path, layer_name):
 
 
 def depthmap_dialog(config):
-    """Custom dialog for depth map options. Writes the chosen values into
-    `config` as the user changes them (variant changes refill the model path
-    field from discovery for visual feedback). Returns True when accepted."""
+    """Custom dialog for depth map options. Loads last-used settings and any
+    previously discovered checkpoint paths so it opens instantly; starts a
+    background `locate` search (with a spinner) only when a variant has no
+    cached path. Writes the chosen values into `config` and persists them.
+    Returns True when accepted."""
+    saved = load_saved()
+    discovered = {k: list(v) for k, v in saved.get("discovered", {}).items()}
+
     dialog = Gtk.Dialog(title=_("Depth Map"), transient_for=None)
     dialog.add_buttons(_("_Cancel"), Gtk.ResponseType.CANCEL,
                        _("_OK"), Gtk.ResponseType.OK)
-    dialog.set_default_size(520, 240)
+    dialog.set_default_size(520, 250)
     dialog.set_resizable(True)
 
     grid = Gtk.Grid()
@@ -356,10 +405,6 @@ def depthmap_dialog(config):
     grid.set_row_spacing(6)
     grid.set_column_spacing(8)
     dialog.get_content_area().add(grid)
-
-    # Snapshot discovery once so the model path field can react to variant
-    # changes without re-running locate on every edit.
-    discovered = find_depth_models()
 
     row = 0
 
@@ -372,15 +417,68 @@ def depthmap_dialog(config):
 
     model_entry = Gtk.Entry()
 
+    # Spinner + label shown while a background discovery runs.
+    search_spinner = Gtk.Spinner()
+    search_spinner.set_size_request(16, 16)
+    search_label = Gtk.Label()
+    search_label.set_halign(Gtk.Align.START)
+
+    # Discovery is run once in a worker thread and merged into `discovered`.
+    # A second search is only started when the user picks a variant with no
+    # cached or already-found path.
+    search_lock = threading.Lock()
+    set_searching = lambda active, msg="": ( \
+        (search_label.set_text(msg), search_spinner.start(), search_spinner.show(), search_label.show()) \
+        if active else (search_spinner.stop(), search_spinner.hide(), search_label.hide()))
+
+    def refresh_field(variant):
+        matches = discovered.get(variant) or []
+        if matches:
+            model_entry.set_text(str(matches[0]))
+
+    def merge_find(result):
+        for v in MODEL_CONFIGS:
+            hits = result.get(v)
+            if hits and not discovered.get(v):
+                discovered[v] = [str(p) for p in hits]
+        # Done: hide the spinner and refill the current variant's field if it
+        # now has a path but the entry is still empty.
+        set_searching(False)
+        variant_t = variant_combo.get_active_id() or "vits"
+        if not model_entry.get_text().strip():
+            refresh_field(variant_t)
+        return False
+
+    def start_search():
+        """Run discovery in a worker thread; keep any fresh results cached."""
+        if not search_lock.acquire(blocking=False):
+            return
+        set_searching(True, _("Searching for models..."))
+
+        def worker():
+            try:
+                result = find_depth_models()
+            finally:
+                search_lock.release()
+            GLib.idle_add(merge_find, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_variant_changed(cb):
         variant = cb.get_active_id() or "vits"
         config.set_property("variant", variant)
-        matches = discovered.get(variant) or []
-        model_entry.set_text(str(matches[0]) if matches else "")
+        if discovered.get(variant) or model_entry.get_text().strip():
+            refresh_field(variant)
+        else:
+            # Nothing cached for this variant: look for it in the background.
+            model_entry.set_text("")
+            start_search()
 
     variant_combo.connect("changed", on_variant_changed)
     grid.attach(variant_label, 0, row, 1, 1)
     grid.attach(variant_combo, 1, row, 1, 1)
+    grid.attach(search_spinner, 2, row, 1, 1)
+    grid.attach(search_label, 3, row, 1, 1)
     row += 1
 
     # Model file (auto-filled by variant; editable as an override)
@@ -445,14 +543,27 @@ def depthmap_dialog(config):
     grid.attach(invert_check, 1, row, 1, 1)
     row += 1
 
-    # Initialize widgets from the current config. Setting the active variant
-    # fires on_variant_changed, which fills the model path field.
-    variant_combo.set_active_id(config.get_property("variant") or "vits")
-    model_entry.set_text(config.get_property("model_path") or "")
-    download_check.set_active(bool(config.get_property("download_if_missing")))
-    output_combo.set_active_id(config.get_property("output") or "grayscale")
-    max_spin.set_value(int(config.get_property("max_side") or 1024))
-    invert_check.set_active(bool(config.get_property("invert")))
+    # Initialize widgets from saved settings. Setting the active variant
+    # fires on_variant_changed and helps fill the model path field.
+    variant_combo.set_active_id(saved.get("variant") or "vits")
+    model_entry.set_text(saved.get("model_path") or "")
+    download_check.set_active(bool(saved.get("download_if_missing")))
+    output_combo.set_active_id(saved.get("output") or "grayscale")
+    max_spin.set_value(int(saved.get("max_side") or 1024))
+    invert_check.set_active(bool(saved.get("invert")))
+
+    # Reflect saved settings into config so OK can rely on config alone.
+    config.set_property("variant", variant_combo.get_active_id() or "vits")
+    config.set_property("model_path", model_entry.get_text())
+    config.set_property("download_if_missing", download_check.get_active())
+    config.set_property("output", output_combo.get_active_id() or "grayscale")
+    config.set_property("max_side", max_spin.get_value_as_int())
+    config.set_property("invert", invert_check.get_active())
+
+    # Kick off a search only when the persisted variant has no cached path.
+    variant_now = variant_combo.get_active_id() or "vits"
+    if not discovered.get(variant_now) and not model_entry.get_text().strip():
+        start_search()
 
     dialog.show_all()
     response = dialog.run()
@@ -460,9 +571,21 @@ def depthmap_dialog(config):
     display = Gdk.Display.get_default()
     if display is not None:
         display.flush()
+    if response != Gtk.ResponseType.OK:
+        return False
 
-    return response == Gtk.ResponseType.OK
-
+    # Persist the last-used settings and the merged discovery cache.
+    persist = {
+        "variant": config.get_property("variant"),
+        "model_path": config.get_property("model_path").strip(),
+        "download_if_missing": bool(config.get_property("download_if_missing")),
+        "output": config.get_property("output"),
+        "max_side": int(config.get_property("max_side")),
+        "invert": bool(config.get_property("invert")),
+        "discovered": discovered,
+    }
+    save_config(persist)
+    return True
 
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
     if run_mode == Gimp.RunMode.INTERACTIVE:
