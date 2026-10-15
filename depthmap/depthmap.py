@@ -159,6 +159,40 @@ def find_depth_models(extra_dirs=None):
     return found
 
 
+def download_url(variant):
+    return ("https://huggingface.co/%s/resolve/main/%s"
+            % (HF_REPOS[variant], CHECKPOINTS[variant]))
+
+
+def download_model(variant, dest_dir, progress=None):
+    """Download a checkpoint into dest_dir (idempotent). Returns the file path."""
+    import ssl
+    import urllib.request
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / CHECKPOINTS[variant]
+    if dest.is_file() and dest.stat().st_size > 0:
+        return dest
+    url = download_url(variant)
+    request = urllib.request.Request(url, headers={'User-Agent': 'gimp-depthmap/1.0'})
+    context = ssl.create_default_context()
+    with urllib.request.urlopen(request, context=context, timeout=60) as resp, \
+            open(dest, 'wb') as out:
+        total = int(resp.headers.get('Content-Length') or 0)
+        read = 0
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+            read += len(chunk)
+            if progress and total:
+                progress(min(1.0, read / float(total)))
+    if progress:
+        progress(1.0)
+    return dest
+
+
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
     return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
                                        GLib.Error(_("Not implemented yet.")))
