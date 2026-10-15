@@ -286,9 +286,10 @@ def export_layer_png(image, layer, path):
     Gimp.Image.delete(tmp_img)
 
 
-def resolve_model(variant, explicit, download, cache):
+def resolve_model(variant, explicit, download, cache, progress=None):
     """Explicit path > discovered checkpoint > download. Raises RuntimeError
-    with a helpful message when nothing resolves."""
+    with a helpful message when nothing resolves. `progress` is an optional
+    callable(fraction) forwarded to download_model while downloading."""
     if explicit:
         p = Path(explicit)
         if not p.is_file():
@@ -299,7 +300,7 @@ def resolve_model(variant, explicit, download, cache):
         return found[variant][0]
     if download:
         try:
-            return download_model(variant, cache, progress=None)
+            return download_model(variant, cache, progress=progress)
         except Exception as e:
             raise RuntimeError(
                 _("Failed to download %s from %s into %s: %s")
@@ -371,7 +372,10 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
 
         Gimp.progress_set_text(_("Resolving depth model..."))
         Gimp.progress_pulse()
-        model_path = resolve_model(variant, explicit, do_download, cache_dir())
+        model_path = resolve_model(
+            variant, explicit, do_download, cache_dir(),
+            progress=lambda frac: Gimp.progress_set_text(
+                _("Downloading %s (%d%%)...") % (CHECKPOINTS[variant], int(frac * 100))))
 
         Gimp.progress_set_text(_("Estimating depth (this may take time)..."))
         Gimp.progress_pulse()
