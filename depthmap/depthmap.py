@@ -102,6 +102,63 @@ def cache_dir():
     return Path.home() / '.cache' / 'gimp-depthmap'
 
 
+def _candidate_dirs():
+    home = Path.home()
+    dirs = []
+    if os.name == 'nt':
+        dirs = [home / 'models', home / 'Downloads',
+                home / 'Downloads' / 'src' / 'ComfyUI' / 'models']
+    else:
+        dirs = [home / 'models', home / 'Downloads',
+                home / 'Downloads' / 'src' / 'ComfyUI' / 'models',
+                Path('/opt/models')]
+    dirs.append(cache_dir())
+    return dirs
+
+
+def _locate_matches():
+    """Best-effort `locate` lookup; returns [] when locate is missing/fails."""
+    import shutil
+    import subprocess
+    if not shutil.which('locate'):
+        return []
+    try:
+        out = subprocess.run(
+            ['locate', '-r', r'depth_anything_v2_vit[bsl]\.pth'],
+            capture_output=True, text=True, timeout=10)
+        return [ln for ln in out.stdout.splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+def find_depth_models(extra_dirs=None):
+    """Find Depth Anything V2 checkpoints on disk. Returns
+    {variant: [sorted Paths]}. V1 checkpoints are excluded by the pattern.
+    rglob is safe here because the candidate dirs are curated and narrow
+    (a fixed list covering the real ComfyUI depth, ~/Downloads/src/ComfyUI/
+    models/, which is 4 levels below the candidate base)."""
+    found = {v: [] for v in MODEL_CONFIGS}
+    paths = set()
+    for line in _locate_matches():
+        paths.add(Path(line))
+    for d in (extra_dirs if extra_dirs is not None else _candidate_dirs()):
+        try:
+            for p in d.rglob('depth_anything_v2_vit*.pth'):
+                paths.add(p)
+        except OSError:
+            continue
+    for p in sorted(paths):
+        v = variant_from_path(p.name)
+        if v and p.is_file():
+            try:
+                if p.stat().st_size < 1000:
+                    continue
+            except OSError:
+                continue
+            found[v].append(p)
+    return found
+
+
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
     return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
                                        GLib.Error(_("Not implemented yet.")))
