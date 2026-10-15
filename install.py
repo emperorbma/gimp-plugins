@@ -8,6 +8,8 @@ Usage:
     python install.py --uninstall  # remove installed plugins
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -40,29 +42,32 @@ PLUGIN_DEPS = {
     "bgremove": {
         "pip": ["numpy<2.5", "numba>=0.66.0", "backgroundremover"],
         "cli": [],
-        "cmd": "pip install --user 'numpy<2.5' 'numba>=0.66.0' backgroundremover",
+        "pip_args": ["install", "--user", "numpy<2.5", "numba>=0.66.0",
+                     "backgroundremover"],
     },
     "upscale": {
         "pip": ["image_gen_aux", "diffusers", "torch", "pillow"],
         "cli": [],
-        "cmd": "pip install --user image_gen_aux diffusers torch pillow",
+        "pip_args": ["install", "--user", "image_gen_aux", "diffusers",
+                     "torch", "pillow"],
     },
     "aiedit": {
         "pip": [],
         "cli": ["sd-cli"],
-        "cmd": "sd-cli binary (see https://github.com/leejet/stable-diffusion.cpp)",
+        "pip_args": [],
     },
     "depthmap": {
         "pip": ["depth-anything-v2", "torch", "torchvision", "pillow",
                 "opencv-python", "matplotlib"],
         "cli": [],
-        "cmd": "pip install --user --no-deps depth-anything-v2 "
-               "torch torchvision pillow opencv-python matplotlib",
+        "pip_args": ["install", "--user", "--no-deps", "depth-anything-v2",
+                     "torch", "torchvision", "pillow", "opencv-python",
+                     "matplotlib"],
     },
     "sd-server": {
         "pip": ["requests"],
         "cli": [],
-        "cmd": "pip install --user requests",
+        "pip_args": ["install", "--user", "requests"],
     },
 }
 
@@ -181,7 +186,8 @@ def _ensure_command(cmd: str, label: str | None = None) -> bool:
         if _prompt_yes_no(f"  Install {pkg} via `{install_cmd_str}`?"):
             try:
                 result = subprocess.run(
-                    install_cmd_str, shell=True, capture_output=True, text=True
+                    install_cmd_str, shell=True, capture_output=True, text=True,
+                    errors="replace",
                 )
                 if result.returncode == 0:
                     _log_ok(f"{pkg} installed.")
@@ -201,6 +207,26 @@ def _ensure_command(cmd: str, label: str | None = None) -> bool:
     return False
 
 
+def _add_to_user_path(directory: Path) -> None:
+    """Add a directory to the user PATH (Windows only)."""
+    if os.name != "nt":
+        return
+    ps_dir = str(directory).replace("'", "''")
+    script = (
+        "$d='%s';"
+        "$p=[Environment]::GetEnvironmentVariable('Path','User');"
+        'if($p -notlike "*$d*"){'
+        "[Environment]::SetEnvironmentVariable('Path',$p+';'+$d,'User')}"
+    ) % ps_dir
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 # ── Dependency checks ─────────────────────────────────────────────────────
 
 def _check_pip() -> bool:
@@ -214,23 +240,24 @@ def _pip_installed(pkg: str) -> bool:
     try:
         result = subprocess.run(
             [pip_cmd, "show", pkg],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, errors="replace", timeout=15,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-def _run_pip_install(cmd: str, dry_run: bool = False) -> bool:
-    """Run a pip install command. Returns True on success."""
-    if not _check_pip():
+def _run_pip_install(pip_args: list[str], dry_run: bool = False) -> bool:
+    """Run a pip install with the given arguments. Returns True on success."""
+    pip_cmd = "pip" if shutil.which("pip") else "pip3"
+    if not pip_cmd:
         _log_fail("pip is not available; cannot install Python packages.")
         return False
     if dry_run:
-        _log_info(f"Would run: {cmd}")
+        _log_info(f"Would run: {pip_cmd} {' '.join(pip_args)}")
         return True
     try:
-        result = subprocess.run(cmd, shell=True)
+        result = subprocess.run([pip_cmd, *pip_args])
         return result.returncode == 0
     except OSError as e:
         _log_fail(f"Failed to run pip: {e}")
@@ -240,7 +267,7 @@ def _run_pip_install(cmd: str, dry_run: bool = False) -> bool:
 def _check_plugin_deps(plugin_name: str) -> dict:
     deps = PLUGIN_DEPS.get(plugin_name)
     if deps is None:
-        return {"status": "unknown", "missing": [], "cmd": None}
+        return {"status": "unknown", "missing": [], "pip_args": []}
 
     results = {}
     for pkg in deps["pip"]:
@@ -249,9 +276,10 @@ def _check_plugin_deps(plugin_name: str) -> dict:
         results[binary] = shutil.which(binary) is not None
 
     missing = [name for name, ok in results.items() if not ok]
+    pip_args = deps.get("pip_args", [])
     if not missing:
-        return {"status": "ok", "missing": [], "cmd": deps["cmd"]}
-    return {"status": "missing", "missing": missing, "cmd": deps["cmd"]}
+        return {"status": "ok", "missing": [], "pip_args": pip_args}
+    return {"status": "missing", "missing": missing, "pip_args": pip_args}
 
 
 def _prompt_yes_no(prompt: str) -> bool:
@@ -285,7 +313,7 @@ def _detect_accelerator() -> str | None:
         return "sycl"
     if shutil.which("pkg-config") and not subprocess.run(
         ["pkg-config", "--exists", "openblas"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, errors="replace", timeout=10,
     ).returncode:
         return "openblas"
     return None
@@ -307,7 +335,7 @@ def _build_sd_cli(dry_run: bool = False) -> bool:
                 result = subprocess.run(
                     ["git", "clone", "--recursive",
                      "https://github.com/leejet/stable-diffusion.cpp", str(sd_repo)],
-                    capture_output=True, text=True, timeout=300,
+                    capture_output=True, text=True, errors="replace", timeout=300,
                 )
                 if result.returncode != 0:
                     _log_fail("Clone failed.")
@@ -352,7 +380,8 @@ def _build_sd_cli(dry_run: bool = False) -> bool:
         gfx_name = None
         try:
             result = subprocess.run(
-                ["rocminfo"], capture_output=True, text=True, timeout=30
+                ["rocminfo"], capture_output=True, text=True,
+                errors="replace", timeout=30,
             )
             match = re.search(r"Name:\s+(gfx\S+)", result.stdout)
             if match:
@@ -383,7 +412,7 @@ def _build_sd_cli(dry_run: bool = False) -> bool:
     try:
         result = subprocess.run(
             f"cmake -B build {cmake_flags}", shell=True, cwd=sd_repo,
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, errors="replace", timeout=120,
         )
         if result.returncode != 0:
             _log_fail("cmake configuration failed.")
@@ -403,7 +432,8 @@ def _build_sd_cli(dry_run: bool = False) -> bool:
     try:
         result = subprocess.run(
             ["cmake", "--build", "build", "--config", "Release"],
-            cwd=sd_repo, capture_output=True, text=True, timeout=600,
+            cwd=sd_repo, capture_output=True, text=True,
+            errors="replace", timeout=600,
         )
         if result.returncode != 0:
             _log_fail("Build failed.")
@@ -422,8 +452,10 @@ def _build_sd_cli(dry_run: bool = False) -> bool:
     _log_info("Installing to ~/.local/bin...")
     try:
         result = subprocess.run(
-            ["cmake", "--install", "build", "--prefix", str(Path.home() / ".local")],
-            cwd=sd_repo, capture_output=True, text=True, timeout=60,
+            ["cmake", "--install", "build", "--config", "Release",
+             "--prefix", str(Path.home() / ".local")],
+            cwd=sd_repo, capture_output=True, text=True,
+            errors="replace", timeout=60,
         )
         if result.returncode != 0:
             _log_fail("Install failed.")
@@ -438,7 +470,19 @@ def _build_sd_cli(dry_run: bool = False) -> bool:
     if found:
         _log_ok("sd-cli built and installed.")
     else:
-        _log_warn("sd-cli was installed but is not on PATH. Add ~/.local/bin to your PATH.")
+        bin_dir = Path.home() / ".local" / "bin"
+        binary = bin_dir / ("sd-cli.exe" if os.name == "nt" else "sd-cli")
+        if binary.exists():
+            _add_to_user_path(bin_dir)
+            _log_ok("sd-cli built and installed.")
+            _log_warn(
+                f"Add {bin_dir} to your PATH (or reopen the terminal) to use sd-cli."
+            )
+            return True
+        _log_warn(
+            f"sd-cli was installed but could not be located. "
+            f"Look in {bin_dir} and add it to your PATH."
+        )
     return found
 
 
@@ -516,7 +560,7 @@ def _prompt_install_deps(plugins: list[Path], dry_run: bool = False) -> list[tup
     """
     has_pip = _check_pip()
 
-    install_commands: list[tuple[str, str]] = []
+    install_commands: list[tuple[str, list[str]]] = []
     results: list[tuple[str, bool]] = []
 
     for plugin in plugins:
@@ -525,15 +569,15 @@ def _prompt_install_deps(plugins: list[Path], dry_run: bool = False) -> list[tup
             _log_ok(f"{plugin.name} \u2014 dependencies satisfied")
         else:
             _log_fail(f"{plugin.name} \u2014 missing: {', '.join(info['missing'])}")
-            if info["cmd"]:
-                install_commands.append((plugin.name, info["cmd"]))
+            if info["pip_args"]:
+                install_commands.append((plugin.name, info["pip_args"]))
 
     if not install_commands:
         return results
 
     print()
-    for name, cmd in install_commands:
-        _log_info(f"{name}: {cmd}")
+    for name, pip_args in install_commands:
+        _log_info(f"{name}: pip {' '.join(pip_args)}")
     print()
 
     if not _prompt_yes_no("Install missing pip dependencies now?"):
@@ -547,9 +591,9 @@ def _prompt_install_deps(plugins: list[Path], dry_run: bool = False) -> list[tup
             results.append((name, False))
         return results
 
-    for name, cmd in install_commands:
+    for name, pip_args in install_commands:
         _log_step(f"Installing {name} dependencies...")
-        if _run_pip_install(cmd, dry_run=dry_run):
+        if _run_pip_install(pip_args, dry_run=dry_run):
             _log_ok(f"{name} dependencies installed.")
             results.append((name, True))
         else:
@@ -587,7 +631,7 @@ def find_gimp_plugins_dir() -> Path | None:
     try:
         result = subprocess.run(
             ["locate", "-r", r"GIMP/.*/plug-ins$"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, errors="replace", timeout=10,
         )
         for path in result.stdout.strip().splitlines():
             p = Path(path)
@@ -651,7 +695,7 @@ def copy_plugin(src: Path, dst_dir: Path, dry_run: bool = False) -> bool:
     """Install a plugin by copying. Returns True on success."""
     dst = dst_dir / src.name
     # Remove any existing destination (file, symlink, directory, or dangling symlink)
-    if dst.is_symlink() or dst.exists() or dst.is_symlink():
+    if dst.is_symlink() or dst.exists():
         if dry_run:
             _log_info("Would remove existing installation")
         else:
@@ -726,6 +770,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
+    if sys.version_info < (3, 10):
+        print("  \u2717 install.py requires Python 3.10 or newer.")
+        sys.exit(1)
+
     args = _parse_args(argv)
     dry_run = args.dry_run
     uninstall = args.uninstall
