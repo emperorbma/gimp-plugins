@@ -321,7 +321,7 @@ def make_depth_layer(image, drawable, png_path, layer_name):
                            Gimp.ImageType.RGBA_IMAGE, 100.0,
                            Gimp.LayerMode.NORMAL)
     image.insert_layer(layer, drawable.get_parent(),
-                       image.get_item_position(drawable) + 1)
+                       image.get_item_position(drawable))
     paste_layer_aligned(image, layer, source)
     Gimp.Image.delete(imported)
     image.active_layer = layer
