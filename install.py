@@ -22,7 +22,7 @@ PLUGIN_DIRS = sorted(
     if d.is_dir() and not d.name.startswith(".") and d.name != "__pycache__"
     and d.name != "test_plugin"
 )
-SKIP_DIRS = {"locale", "images", ".venv", "__pycache__"}
+SKIP_DIRS = {"locale", "images", ".venv", "__pycache__", "docs"}
 
 
 def _find_sd_repo() -> Path:
