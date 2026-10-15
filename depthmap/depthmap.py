@@ -81,15 +81,6 @@ def variant_from_path(name):
     return m.group(1) if m else None
 
 
-def height_from_max_side(w, h, max_side):
-    """Aspect-preserving processing height so the larger side ~= max_side.
-    Native height is kept when the image is already smaller than max_side."""
-    if max(w, h) <= max_side:
-        return h
-    scale = float(max_side) / max(w, h)
-    return int(round(h * scale))
-
-
 def cache_dir():
     """Directory used for auto-downloaded checkpoints. Overridable via the
     GIMP_DEPTHMAP_CACHE environment variable, else XDG cache dir."""
@@ -191,6 +182,58 @@ def download_model(variant, dest_dir, progress=None):
     if progress:
         progress(1.0)
     return dest
+
+
+def _require_deps():
+    """Verify torch and depth-anything-v2 are importable; raise RuntimeError
+    with install instructions otherwise. Returns the torch module."""
+    missing = []
+    try:
+        import torch
+    except ImportError:
+        missing.append('torch')
+    try:
+        import depth_anything_v2  # noqa: F401
+    except ImportError:
+        missing.append('depth-anything-v2')
+    if missing:
+        raise RuntimeError(
+            _("Missing dependency: %s. Install with: pip install %s pillow")
+            % (', '.join(missing), ' '.join(missing)))
+    return torch
+
+
+def get_model(path, variant):
+    """Load a Depth Anything V2 checkpoint, cached by path."""
+    path = str(path)
+    if path in MODEL_CACHE:
+        return MODEL_CACHE[path]
+    torch = _require_deps()
+    from depth_anything_v2.dpt import DepthAnythingV2
+    model = DepthAnythingV2(**MODEL_CONFIGS[variant])
+    state = torch.load(path, map_location='cpu')
+    model.load_state_dict(state)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device).eval()
+    MODEL_CACHE[path] = model
+    return model
+
+
+def infer_depth(model, pil_image, max_side):
+    """Run the model and return (grayscale HxW uint8, colored HxWx3 uint8).
+    The PIL image is passed as BGR numpy because depth_anything_v2's
+    infer_image expects OpenCV-style input and picks `input_size` as the
+    processing resolution (aspect-preserving, multiple of 14)."""
+    import numpy as np
+    from matplotlib import colormaps
+    rgb = np.asarray(pil_image, dtype=np.uint8)
+    bgr = rgb[:, :, ::-1]
+    depth = model.infer_image(bgr, input_size=max_side)  # float32 HxW
+    depth = depth - depth.min()
+    span = depth.max()
+    gray = (depth / span * 255.0).astype(np.uint8) if span > 0 else np.zeros_like(depth, dtype=np.uint8)
+    colored = (colormaps['inferno'](gray / 255.0)[:, :, :3] * 255.0).astype(np.uint8)
+    return gray, colored
 
 
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
