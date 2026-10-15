@@ -113,6 +113,7 @@ def load_saved():
         "output": "grayscale",
         "max_side": 1024,
         "invert": False,
+        "export_3d": False,
         "discovered": {},
     }
     try:
@@ -342,6 +343,48 @@ def export_layer_png(image, layer, path):
     Gimp.Image.delete(tmp_img)
 
 
+def save_layer_jpg(image, layer, path):
+    """Render a single layer at its canvas position to a full-canvas JPEG at
+    `path`, compositing alpha onto white (JPEG has no alpha channel)."""
+    from PIL import Image as PILImage
+    tmp_png = Path(tempfile.gettempdir()) / f"gimp_depthmap_export_{os.getpid()}.png"
+    try:
+        export_layer_png(image, layer, tmp_png)
+        rgba = PILImage.open(str(tmp_png)).convert("RGBA")
+        canvas = PILImage.new("RGB", rgba.size, (255, 255, 255))
+        canvas.paste(rgba, mask=rgba.split()[3])
+        canvas.save(str(path), "JPEG", quality=95)
+    finally:
+        if tmp_png.exists():
+            os.remove(tmp_png)
+
+
+def export_3d_chooser():
+    """Ask for the base name/location of a Facebook 3D photo export. Returns
+    a Path without extension (the color and depth files get `.jpg` and
+    `_depth.jpg` appended), or None when the user cancels."""
+    chooser = Gtk.FileChooserDialog(
+        title=_("Export 3D Photo (Facebook)"),
+        transient_for=None,
+        action=Gtk.FileChooserAction.SAVE)
+    chooser.add_buttons(_("_Cancel"), Gtk.ResponseType.CANCEL,
+                        _("_Save"), Gtk.ResponseType.ACCEPT)
+    chooser.set_do_overwrite_confirmation(True)
+    chooser.set_current_name("3d_photo.jpg")
+    result = None
+    if chooser.run() == Gtk.ResponseType.ACCEPT:
+        chosen = Path(chooser.get_filename())
+        if chosen.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp',
+                                     '.bmp', '.tif', '.tiff', '.gif'):
+            chosen = chosen.with_suffix('')
+        result = chosen
+    chooser.destroy()
+    display = Gdk.Display.get_default()
+    if display is not None:
+        display.flush()
+    return result
+
+
 def resolve_model(variant, explicit, download, cache, progress=None):
     """Explicit path > discovered checkpoint > download. Raises RuntimeError
     with a helpful message when nothing resolves. `progress` is an optional
@@ -543,6 +586,17 @@ def depthmap_dialog(config):
     grid.attach(invert_check, 1, row, 1, 1)
     row += 1
 
+    # Export as 3D photo (Facebook)
+    export_check = Gtk.CheckButton.new_with_mnemonic(
+        _("Export as _3D photo (Facebook)"))
+
+    def on_export_toggled(cb):
+        config.set_property("export_3d", cb.get_active())
+
+    export_check.connect("toggled", on_export_toggled)
+    grid.attach(export_check, 1, row, 1, 1)
+    row += 1
+
     # Initialize widgets from saved settings. Setting the active variant
     # fires on_variant_changed and helps fill the model path field.
     variant_combo.set_active_id(saved.get("variant") or "vits")
@@ -551,6 +605,7 @@ def depthmap_dialog(config):
     output_combo.set_active_id(saved.get("output") or "grayscale")
     max_spin.set_value(int(saved.get("max_side") or 1024))
     invert_check.set_active(bool(saved.get("invert")))
+    export_check.set_active(bool(saved.get("export_3d")))
 
     # Reflect saved settings into config so OK can rely on config alone.
     config.set_property("variant", variant_combo.get_active_id() or "vits")
@@ -559,6 +614,7 @@ def depthmap_dialog(config):
     config.set_property("output", output_combo.get_active_id() or "grayscale")
     config.set_property("max_side", max_spin.get_value_as_int())
     config.set_property("invert", invert_check.get_active())
+    config.set_property("export_3d", export_check.get_active())
 
     # Kick off a search only when the persisted variant has no cached path.
     variant_now = variant_combo.get_active_id() or "vits"
@@ -582,6 +638,7 @@ def depthmap_dialog(config):
         "output": config.get_property("output"),
         "max_side": int(config.get_property("max_side")),
         "invert": bool(config.get_property("invert")),
+        "export_3d": bool(config.get_property("export_3d")),
         "discovered": discovered,
     }
     save_config(persist)
@@ -592,6 +649,23 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
         GimpUi.init(PLUGIN_NAME)
         if not depthmap_dialog(config):
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+    export_3d = bool(config.get_property("export_3d"))
+    export_base = None
+    if export_3d:
+        configured = config.get_property("export_3d_path").strip()
+        if run_mode == Gimp.RunMode.INTERACTIVE and not configured:
+            export_base = export_3d_chooser()
+            if export_base is None:
+                return procedure.new_return_values(Gimp.PDBStatusType.CANCEL,
+                                                   GLib.Error())
+        elif configured:
+            export_base = Path(configured)
+        else:
+            return procedure.new_return_values(
+                Gimp.PDBStatusType.EXECUTION_ERROR,
+                GLib.Error(_("3D photo export needs a target path: set the "
+                             "'export_3d_path' argument or run interactively.")))
 
     Gimp.context_push()
     image.undo_group_start()
@@ -646,6 +720,14 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
         make_depth_layer(image, drawable, output_gray, _("Depth (grayscale)"))
         if output_mode in ("colored", "both"):
             make_depth_layer(image, drawable, output_color, _("Depth (colored)"))
+        if export_3d and export_base is not None:
+            Gimp.progress_set_text(_("Exporting 3D photo..."))
+            Gimp.progress_pulse()
+            color_jpg = Path(str(export_base) + '.jpg')
+            depth_jpg = Path(str(export_base) + '_depth.jpg')
+            save_layer_jpg(image, drawables[0], color_jpg)
+            PILImage.fromarray(depth).save(str(depth_jpg), "JPEG", quality=95)
+            Gimp.message(_("3D photo saved:\n%s\n%s") % (color_jpg, depth_jpg))
 
         Gimp.displays_flush()
     except Exception as e:
@@ -735,6 +817,22 @@ class DepthMap (Gimp.PlugIn):
             "invert", _("_Invert (for lens blur)"),
             _("Swap near and far so lens blur can blur the background"),
             False, GObject.ParamFlags.READWRITE,
+        )
+
+        # Export as 3D photo (Facebook)
+        procedure.add_boolean_argument(
+            "export_3d", _("_Export as 3D photo (Facebook)"),
+            _("Prompts for a location, then saves the layer as name.jpg and "
+              "the depth map as name_depth.jpg for Facebook 3D photos"),
+            False, GObject.ParamFlags.READWRITE,
+        )
+
+        # Base path for non-interactive 3D photo export
+        procedure.add_string_argument(
+            "export_3d_path", _("_3D photo path"),
+            _("Base path for the 3D photo export (name.jpg and name_depth.jpg "
+              "are written beside it)"),
+            "", GObject.ParamFlags.READWRITE,
         )
 
         return procedure

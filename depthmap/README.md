@@ -15,6 +15,20 @@ running in-process (the `upscale.py` pattern).
    chosen variant into `~/.cache/gimp-depthmap/`, then adds the depth map as a
    new layer above the current layer
 
+## 3D photo export (Facebook)
+
+Tick **Export as 3D photo (Facebook)** to also publish the result as a
+[Facebook 3D photo](https://www.facebook.com/help/www/414295416095269).
+After the dialog, GIMP asks for a name and location, and once the depth map is
+finished it writes two JPEGs:
+
+- `<name>.jpg` — the source layer (alpha composited onto white)
+- `<name>_depth.jpg` — the grayscale depth map (white = near, black = far)
+
+Upload both files together to Facebook to get a 3D photo. If the parallax
+looks inverted, rerun with **Invert (for lens blur)** enabled. The export uses
+the grayscale depth map even when the on-canvas output is set to colored.
+
 ## Dependencies
 
 ```shell
