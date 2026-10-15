@@ -23,15 +23,17 @@ import locale
 import gettext
 
 import gi
-gi.require_version('Gimp', '3.0')
 from gi.repository import Gimp
 gi.require_version('GimpUi', '3.0')
 from gi.repository import GimpUi
-gi.require_version('Gegl', '0.4')
 from gi.repository import Gegl
 from gi.repository import GObject
 from gi.repository import GLib
 from gi.repository import Gio
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk
 
 PLUGIN_NAME = "python-fu-depthmap"
 LOCALE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'locale'))
@@ -66,9 +68,9 @@ HF_REPOS = {
 }
 
 VARIANT_LABELS = {
-    'vits': _('Small (vits)'),
-    'vitb': _('Base (vitb)'),
-    'vitl': _('Large (vitl)'),
+    'vits': _('vits (small)'),
+    'vitb': _('vitb (base)'),
+    'vitl': _('vitl (large)'),
 }
 
 MODEL_CACHE = {}
@@ -236,6 +238,16 @@ def infer_depth(model, pil_image, max_side):
     return gray, colored
 
 
+def invert_depth(gray, colored):
+    """Invert a depth map (near<->far) and recolor it, for lens blur."""
+    import numpy as np
+    from matplotlib import colormaps
+    gray = np.asarray(gray, dtype=np.uint8)
+    inverted = (255 - gray).astype(np.uint8)
+    recolored = (colormaps['inferno'](inverted / 255.0)[:, :, :3] * 255.0).astype(np.uint8)
+    return inverted, recolored
+
+
 def paste_layer_aligned(image, target_layer, source_layer):
     """Copy `source_layer`'s pixels into `target_layer`, aligned to the target
     layer origin. An active selection is temporarily cleared so the marching
@@ -329,18 +341,133 @@ def make_depth_layer(image, drawable, png_path, layer_name):
     return layer
 
 
+def depthmap_dialog(config):
+    """Custom dialog for depth map options. Writes the chosen values into
+    `config` as the user changes them (variant changes refill the model path
+    field from discovery for visual feedback). Returns True when accepted."""
+    dialog = Gtk.Dialog(title=_("Depth Map"), transient_for=None)
+    dialog.add_buttons(_("_Cancel"), Gtk.ResponseType.CANCEL,
+                       _("_OK"), Gtk.ResponseType.OK)
+    dialog.set_default_size(520, 240)
+    dialog.set_resizable(True)
+
+    grid = Gtk.Grid()
+    grid.set_border_width(12)
+    grid.set_row_spacing(6)
+    grid.set_column_spacing(8)
+    dialog.get_content_area().add(grid)
+
+    # Snapshot discovery once so the model path field can react to variant
+    # changes without re-running locate on every edit.
+    discovered = find_depth_models()
+
+    row = 0
+
+    # Depth Anything V2 variant
+    variant_label = Gtk.Label.new_with_mnemonic(_("Depth Anything V2 _Variant:"))
+    variant_label.set_halign(Gtk.Align.START)
+    variant_combo = Gtk.ComboBoxText()
+    for key in MODEL_CONFIGS:
+        variant_combo.append(key, VARIANT_LABELS[key])
+
+    model_entry = Gtk.Entry()
+
+    def on_variant_changed(cb):
+        variant = cb.get_active_id() or "vits"
+        config.set_property("variant", variant)
+        matches = discovered.get(variant) or []
+        model_entry.set_text(str(matches[0]) if matches else "")
+
+    variant_combo.connect("changed", on_variant_changed)
+    grid.attach(variant_label, 0, row, 1, 1)
+    grid.attach(variant_combo, 1, row, 1, 1)
+    row += 1
+
+    # Model file (auto-filled by variant; editable as an override)
+    model_label = Gtk.Label.new_with_mnemonic(_("_Model file:"))
+    model_label.set_halign(Gtk.Align.START)
+
+    def on_model_changed(entry):
+        config.set_property("model_path", entry.get_text())
+
+    model_entry.connect("changed", on_model_changed)
+    grid.attach(model_label, 0, row, 1, 1)
+    grid.attach(model_entry, 1, row, 1, 1)
+    row += 1
+
+    # Download if missing
+    download_check = Gtk.CheckButton.new_with_mnemonic(_("_Download if missing"))
+
+    def on_download_toggled(cb):
+        config.set_property("download_if_missing", cb.get_active())
+
+    download_check.connect("toggled", on_download_toggled)
+    grid.attach(download_check, 1, row, 1, 1)
+    row += 1
+
+    # Output mode
+    output_label = Gtk.Label.new_with_mnemonic(_("_Output:"))
+    output_label.set_halign(Gtk.Align.START)
+    output_combo = Gtk.ComboBoxText()
+    output_combo.append("grayscale", _("Grayscale"))
+    output_combo.append("colored", _("Colored (inferno)"))
+    output_combo.append("both", _("Both"))
+
+    def on_output_changed(cb):
+        config.set_property("output", cb.get_active_id() or "grayscale")
+
+    output_combo.connect("changed", on_output_changed)
+    grid.attach(output_label, 0, row, 1, 1)
+    grid.attach(output_combo, 1, row, 1, 1)
+    row += 1
+
+    # Max side (px)
+    max_label = Gtk.Label.new_with_mnemonic(_("_Max side (px):"))
+    max_label.set_halign(Gtk.Align.START)
+    max_adj = Gtk.Adjustment.new(1024, 256, 4096, 1, 64, 0)
+    max_spin = Gtk.SpinButton(adjustment=max_adj, climb_rate=1.0, digits=0)
+
+    def on_max_changed(spin):
+        config.set_property("max_side", spin.get_value_as_int())
+
+    max_spin.connect("value-changed", on_max_changed)
+    grid.attach(max_label, 0, row, 1, 1)
+    grid.attach(max_spin, 1, row, 1, 1)
+    row += 1
+
+    # Invert (for lens blur)
+    invert_check = Gtk.CheckButton.new_with_mnemonic(_("_Invert (for lens blur)"))
+
+    def on_invert_toggled(cb):
+        config.set_property("invert", cb.get_active())
+
+    invert_check.connect("toggled", on_invert_toggled)
+    grid.attach(invert_check, 1, row, 1, 1)
+    row += 1
+
+    # Initialize widgets from the current config. Setting the active variant
+    # fires on_variant_changed, which fills the model path field.
+    variant_combo.set_active_id(config.get_property("variant") or "vits")
+    model_entry.set_text(config.get_property("model_path") or "")
+    download_check.set_active(bool(config.get_property("download_if_missing")))
+    output_combo.set_active_id(config.get_property("output") or "grayscale")
+    max_spin.set_value(int(config.get_property("max_side") or 1024))
+    invert_check.set_active(bool(config.get_property("invert")))
+
+    dialog.show_all()
+    response = dialog.run()
+    dialog.destroy()
+    display = Gdk.Display.get_default()
+    if display is not None:
+        display.flush()
+
+    return response == Gtk.ResponseType.OK
+
+
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
     if run_mode == Gimp.RunMode.INTERACTIVE:
         GimpUi.init(PLUGIN_NAME)
-        dialog = GimpUi.ProcedureDialog.new(procedure, config, _("Depth Map"))
-        dialog.fill(None)
-        response = dialog.run()
-        # Tear the dialog down so it does not linger while inference runs.
-        display = dialog.get_display()
-        dialog.destroy()
-        if display is not None:
-            display.flush()
-        if not response:
+        if not depthmap_dialog(config):
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
 
     Gimp.context_push()
@@ -382,6 +509,8 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
         pil_image = PILImage.open(str(input_path)).convert("RGB")
         model = get_model(model_path, variant)
         depth, colored = infer_depth(model, pil_image, max_side)
+        if config.get_property("invert"):
+            depth, colored = invert_depth(depth, colored)
 
         PILImage.fromarray(depth).save(str(output_gray), "PNG")
         if output_mode in ("colored", "both"):
@@ -443,7 +572,7 @@ class DepthMap (Gimp.PlugIn):
         for i, key in enumerate(MODEL_CONFIGS):
             variant_choice.add(key, i, key, VARIANT_LABELS[key])
         procedure.add_choice_argument(
-            "variant", _("_Variant"), _("Depth Anything V2 model size"),
+            "variant", _("Depth Anything V2 _Variant"), _("Depth Anything V2 model size"),
             variant_choice, "vits", GObject.ParamFlags.READWRITE,
         )
 
@@ -476,6 +605,13 @@ class DepthMap (Gimp.PlugIn):
             "max_side", _("_Max side (px)"),
             _("Larger side of the inference resolution; higher = better detail, slower"),
             256, 4096, 1024, GObject.ParamFlags.READWRITE,
+        )
+
+        # Invert (for lens blur)
+        procedure.add_boolean_argument(
+            "invert", _("_Invert (for lens blur)"),
+            _("Swap near and far so lens blur can blur the background"),
+            False, GObject.ParamFlags.READWRITE,
         )
 
         return procedure
