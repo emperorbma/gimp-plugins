@@ -37,6 +37,7 @@ After restart, plugins appear in the GIMP menus:
 - **Background Remove**: Filters → AI → Remove Background...
 - **AI Upscale**: Filters → AI → Upscale...
 - **AI Edit**: Filters → AI → AI Edit...
+- **Depth Map**: Filters → AI → Depth Map...
 - **SD Server**: Filters → AI → SD Server...
 
 **Keyboard Shortcuts.** Go to Edit -> Keyboard Shortcuts and type the name of the plugin.
@@ -67,7 +68,7 @@ pip install opencv-python matplotlib  # only if not already installed
 
 ### 2. Place plugins in GIMP's plug-ins directory
 
-The installer looks for the highest-numbered GIMP/xx.x/plug-ins directory. Install whichever plugins you need. If you have `sd-server` running, you might be able to get by with just `bgremove` and `sd-server` plugins.
+The installer looks for the highest-numbered GIMP/xx.x/plug-ins directory. Install whichever plugins you need. If you have `sd-server` running, you might be able to get by with just `bgremove`, `depthmap`, and `sd-server` plugins. With Qwen Image 2.1 (default), and careful prompting, `sd-server` can do it all, removing backgrounds, & making depth maps, but it's slower & experimental. Not likely to be supported.
 
 ```shell
 git clone https://github.com/themanyone/gimp-plugins.git
