@@ -119,7 +119,8 @@ def bgremove_func(procedure, run_mode, image, drawables, config, data):
             # Optional parameters can be added here, e.g., --model u2net
         ]
 
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, encoding="utf-8", errors="replace")
         stderr_lines = []
         for line in process.stderr:
             stderr_lines.append(line)

@@ -49,20 +49,24 @@ gettext.textdomain(PLUGIN_NAME)
 def _(message): return gettext.gettext(message)
 def N_(message): return message
 
-# Models paths
-HOME_PATH = os.environ.get('HOME')
-MODELS_PATH = HOME_PATH + "/Downloads/src/ComfyUI/models"
-LLM_PATH = "/win/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS"
+# Model path defaults. Windows has no HOME env var, so resolve the user
+# profile explicitly; these are editable defaults shown in the dialog.
+HOME_PATH = os.environ.get('HOME') or str(Path.home())
+MODELS_PATH = os.path.join(HOME_PATH, "Downloads", "src", "ComfyUI", "models")
+if os.name == "nt":
+    LLM_PATH = os.path.join(HOME_PATH, "models", "Qwen3-VL-8B-Instruct-UD-IQ3_XXS")
+else:
+    LLM_PATH = "/win/models/Qwen3-VL-8B-Instruct-UD-IQ3_XXS"
 
 # Default paths (Qwen Image 2.1 Turbo)
-DEFAULT_DIFFUSION_MODEL = MODELS_PATH + "/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf"
-DEFAULT_LLM = LLM_PATH + "/Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf"
-DEFAULT_LLM_VISION = LLM_PATH + "/mmproj-F16.gguf"
-DEFAULT_VAE = MODELS_PATH + "/vae/qwen_image_2.1_vae_bf16.safetensors"
+DEFAULT_DIFFUSION_MODEL = os.path.join(MODELS_PATH, "diffusion_models", "qwen-image-2.1-turbo-Q4_K_M.gguf")
+DEFAULT_LLM = os.path.join(LLM_PATH, "Qwen3-VL-8B-Instruct-UD-IQ3_XXS.gguf")
+DEFAULT_LLM_VISION = os.path.join(LLM_PATH, "mmproj-F16.gguf")
+DEFAULT_VAE = os.path.join(MODELS_PATH, "vae", "qwen_image_2.1_vae_bf16.safetensors")
 DEFAULT_SIGMAS = "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
 
 # Config presets directory
-CONFIG_DIR = os.path.join(os.environ.get('HOME'), '.config', 'gimp-plugins', 'aiimage')
+CONFIG_DIR = os.path.join(HOME_PATH, '.config', 'gimp-plugins', 'aiimage')
 PRESETS_FILE = os.path.join(CONFIG_DIR, 'presets.json')
 
 def load_presets():
@@ -595,7 +599,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
             "-p", config.get_property("prompt"),
         ])
 
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True,
+                                   encoding="utf-8", errors="replace")
         stderr_lines = []
         for line in process.stderr:
             stderr_lines.append(line)
