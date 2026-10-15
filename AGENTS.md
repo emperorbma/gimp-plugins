@@ -174,6 +174,23 @@ output_path = temp_dir / f"gimp_<name>_output_{os.getpid()}.png"
 - Entry: `Gimp.main(AIImage.__gtype_name__, sys.argv)`
 - Entry point must be executable (`chmod +x`) for GIMP to discover it
 
+### depthmap (`depthmap.py`)
+
+- Own in-process Depth Anything V2 inferencer, plus a **Stereo Views** command
+  (`python-fu-depthmap-stereo`) that renders left/right eye views (and/or a
+  red-cyan anaglyph) via the shared `dibr.py` module. The combined result is
+  saved to a temp PNG, loaded with `Gimp.file_load`, and opened in a **new
+  tab** via `Gimp.Display.new()` — the source image is never modified (same
+  pattern as `aiimage`, not the "add a layer" flow).
+- Depth convention: **larger = farther** in the exported grayscale ("white =
+  far"); in `dibr.py` the disparity map is inverted so near becomes 1.
+- Two commands share one dialog-persistence layer: `load_saved()`/`save_config()`
+  use `stereo_`-prefixed keys for stereo-only settings.
+- `estimate_depth_for_layer()` exports → resolves model → infers → returns
+  `(depth, colored, pil_image, model_path)`; both handlers use it.
+- `dibr.py` is pure numpy + PIL (backward-mapping would smear depth edges, so it
+  forward-maps with a z-buffer, then directionally fills disocclusion holes).
+
 ---
 
 ## Gotchas & Non-Obvious Patterns

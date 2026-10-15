@@ -63,3 +63,30 @@ hf download depth-anything/Depth-Anything-V2-Small \
 ## Menu
 
 `<Image>/Filters/AI/` — Depth Map...
+
+## Stereo views (left/right eyes + anaglyph)
+
+**Filters → AI → Stereo Views...** renders left and right eye views of the
+scene using depth-image-based rendering (DIBR), reusing the same Depth
+Anything V2 model as Depth Map:
+
+- **Parallax (px)** — maximum horizontal shift between the eyes; larger =
+  stronger 3D. 20–40 suits typical resolutions.
+- **Create** — opens a **new GIMP tab** (the current image is never modified
+  or resized): *Side-by-side (new tab)* builds a single layer with the left
+  eye on the left half and the right eye on the right half (viewable as
+  cross-eyed/parallel stereo, or as a wiggle animation), *Red-cyan anaglyph
+  (new tab)* produces a single layer for red/cyan glasses, and *Both* opens
+  both tabs.
+
+The warp is a forward mapping with a z-buffer (the nearest pixel wins where
+several sources collide, matching real occlusion), and exposed background is
+filled directionally from the side it was uncovered on. The depth map is
+blurred slightly beforehand, which shrinks disocclusion holes and removes
+jaggy depth edges. Implementation lives in `dibr.py` (pure numpy + PIL, no
+extra dependencies), also usable standalone:
+
+```python
+from dibr import make_stereo
+left, right = make_stereo(color_pil, depth_pil, base=30.0)
+```

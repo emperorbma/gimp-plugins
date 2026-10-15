@@ -37,6 +37,12 @@ from gi.repository import Gtk
 gi.require_version('Gdk', '3.0')
 from gi.repository import Gdk
 
+try:
+    import dibr
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import dibr
+
 PLUGIN_NAME = "python-fu-depthmap"
 LOCALE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'locale'))
 
@@ -644,6 +650,35 @@ def depthmap_dialog(config):
     save_config(persist)
     return True
 
+def estimate_depth_for_layer(image, drawable, variant, explicit, do_download,
+                             max_side):
+    """Export `drawable` to a temp PNG, resolve the model, run depth
+    estimation, and return (depth, colored, pil_image, model_path). The
+    temp input file is cleaned up before returning. Progress is reported
+    through Gimp."""
+    from PIL import Image as PILImage
+    temp_dir = Path(tempfile.gettempdir())
+    input_path = temp_dir / f"gimp_depthmap_input_{os.getpid()}.png"
+    try:
+        Gimp.progress_init(_("Saving layer for depth estimation..."))
+        export_layer_png(image, drawable, input_path)
+
+        Gimp.progress_set_text(_("Resolving depth model..."))
+        Gimp.progress_pulse()
+        model_path = resolve_model(
+            variant, explicit, do_download, cache_dir(),
+            progress=lambda frac: Gimp.progress_set_text(
+                _("Downloading %s (%d%%)...") % (CHECKPOINTS[variant], int(frac * 100))))
+
+        Gimp.progress_set_text(_("Estimating depth (this may take time)..."))
+        Gimp.progress_pulse()
+        pil_image = PILImage.open(str(input_path)).convert("RGB")
+        model = get_model(model_path, variant)
+        depth, colored = infer_depth(model, pil_image, max_side)
+        return depth, colored, pil_image, model_path
+    finally:
+        if input_path.exists():
+            os.remove(input_path)
 def depthmap_func(procedure, run_mode, image, drawables, config, data):
     if run_mode == Gimp.RunMode.INTERACTIVE:
         GimpUi.init(PLUGIN_NAME)
@@ -667,45 +702,29 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
                 GLib.Error(_("3D photo export needs a target path: set the "
                              "'export_3d_path' argument or run interactively.")))
 
-    Gimp.context_push()
-    image.undo_group_start()
-
     if not drawables:
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
                                            GLib.Error(_("No drawable provided.")))
 
-    input_path = None
+    Gimp.context_push()
+    image.undo_group_start()
+
     output_gray = None
     output_color = None
     try:
         temp_dir = Path(tempfile.gettempdir())
-        input_path = temp_dir / f"gimp_depthmap_input_{os.getpid()}.png"
         output_gray = temp_dir / f"gimp_depthmap_output_gray_{os.getpid()}.png"
         output_color = temp_dir / f"gimp_depthmap_output_color_{os.getpid()}.png"
 
         from PIL import Image as PILImage
+        depth, colored, _pil, _model = estimate_depth_for_layer(
+            image, drawables[0],
+            config.get_property("variant"),
+            config.get_property("model_path").strip(),
+            config.get_property("download_if_missing"),
+            config.get_property("max_side"))
 
-        Gimp.progress_init(_("Saving layer for depth estimation..."))
-        export_layer_png(image, drawables[0], input_path)
-
-        variant = config.get_property("variant")
-        explicit = config.get_property("model_path").strip()
-        do_download = config.get_property("download_if_missing")
         output_mode = config.get_property("output")
-        max_side = config.get_property("max_side")
-
-        Gimp.progress_set_text(_("Resolving depth model..."))
-        Gimp.progress_pulse()
-        model_path = resolve_model(
-            variant, explicit, do_download, cache_dir(),
-            progress=lambda frac: Gimp.progress_set_text(
-                _("Downloading %s (%d%%)...") % (CHECKPOINTS[variant], int(frac * 100))))
-
-        Gimp.progress_set_text(_("Estimating depth (this may take time)..."))
-        Gimp.progress_pulse()
-        pil_image = PILImage.open(str(input_path)).convert("RGB")
-        model = get_model(model_path, variant)
-        depth, colored = infer_depth(model, pil_image, max_side)
         if config.get_property("invert"):
             depth, colored = invert_depth(depth, colored)
 
@@ -735,13 +754,295 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
                                            GLib.Error(str(e)))
     finally:
-        for p in (input_path, output_gray, output_color):
+        for p in (output_gray, output_color):
             if p is not None and p.exists():
                 os.remove(p)
 
     image.undo_group_end()
     Gimp.context_pop()
     return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
+
+def stereo_dialog(config):
+    """Custom dialog for stereo view options. Loads last-used settings so it
+    opens instantly and persists the chosen values. Returns True when
+    accepted."""
+    saved = load_saved()
+
+    dialog = Gtk.Dialog(title=_("Stereo Views"), transient_for=None)
+    dialog.add_buttons(_("_Cancel"), Gtk.ResponseType.CANCEL,
+                       _("_OK"), Gtk.ResponseType.OK)
+    dialog.set_default_size(520, 280)
+    dialog.set_resizable(True)
+
+    grid = Gtk.Grid()
+    grid.set_border_width(12)
+    grid.set_row_spacing(6)
+    grid.set_column_spacing(8)
+    dialog.get_content_area().add(grid)
+
+    row = 0
+
+    # Depth Anything V2 variant
+    variant_label = Gtk.Label.new_with_mnemonic(
+        _("Depth Anything V2 _Variant:"))
+    variant_label.set_halign(Gtk.Align.START)
+    variant_combo = Gtk.ComboBoxText()
+    for key in MODEL_CONFIGS:
+        variant_combo.append(key, VARIANT_LABELS[key])
+
+    def on_variant_changed(cb):
+        config.set_property("variant", cb.get_active_id() or "vits")
+
+    variant_combo.connect("changed", on_variant_changed)
+    grid.attach(variant_label, 0, row, 1, 1)
+    grid.attach(variant_combo, 1, row, 1, 1)
+    row += 1
+
+    # Model file (optional override)
+    model_label = Gtk.Label.new_with_mnemonic(_("_Model file:"))
+    model_label.set_halign(Gtk.Align.START)
+    model_entry = Gtk.Entry()
+
+    def on_model_changed(entry):
+        config.set_property("model_path", entry.get_text())
+
+    model_entry.connect("changed", on_model_changed)
+    grid.attach(model_label, 0, row, 1, 1)
+    grid.attach(model_entry, 1, row, 1, 1)
+    row += 1
+
+    # Download if missing
+    download_check = Gtk.CheckButton.new_with_mnemonic(_("_Download if missing"))
+
+    def on_download_toggled(cb):
+        config.set_property("download_if_missing", cb.get_active())
+
+    download_check.connect("toggled", on_download_toggled)
+    grid.attach(download_check, 1, row, 1, 1)
+    row += 1
+
+    # Inference resolution
+    max_label = Gtk.Label.new_with_mnemonic(_("_Max side (px):"))
+    max_label.set_halign(Gtk.Align.START)
+    max_adj = Gtk.Adjustment.new(1024, 256, 4096, 1, 64, 0)
+    max_spin = Gtk.SpinButton(adjustment=max_adj, climb_rate=1.0, digits=0)
+
+    def on_max_changed(spin):
+        config.set_property("max_side", spin.get_value_as_int())
+
+    max_spin.connect("value-changed", on_max_changed)
+    grid.attach(max_label, 0, row, 1, 1)
+    grid.attach(max_spin, 1, row, 1, 1)
+    row += 1
+
+    # Maximum parallax
+    shift_label = Gtk.Label.new_with_mnemonic(_("_Parallax (px):"))
+    shift_label.set_halign(Gtk.Align.START)
+    shift_adj = Gtk.Adjustment.new(24, 0, 512, 1, 8, 0)
+    shift_spin = Gtk.SpinButton(adjustment=shift_adj, climb_rate=1.0, digits=0)
+
+    def on_shift_changed(spin):
+        config.set_property("max_shift", spin.get_value_as_int())
+
+    shift_spin.connect("value-changed", on_shift_changed)
+    grid.attach(shift_label, 0, row, 1, 1)
+    grid.attach(shift_spin, 1, row, 1, 1)
+    row += 1
+
+    # Create: combined views in a new tab
+    output_label = Gtk.Label.new_with_mnemonic(_("_Create:"))
+    output_label.set_halign(Gtk.Align.START)
+    output_combo = Gtk.ComboBoxText()
+    output_combo.append("side_by_side", _("Side-by-side (new tab)"))
+    output_combo.append("anaglyph", _("Red-cyan anaglyph (new tab)"))
+    output_combo.append("both", _("Both (new tabs)"))
+
+    def on_output_changed(cb):
+        config.set_property("stereo_output",
+                            cb.get_active_id() or "side_by_side")
+
+    output_combo.connect("changed", on_output_changed)
+    grid.attach(output_label, 0, row, 1, 1)
+    grid.attach(output_combo, 1, row, 1, 1)
+    row += 1
+
+    # Initialize widgets from saved settings, then mirror into config.
+    variant_combo.set_active_id(saved.get("variant") or "vits")
+    model_entry.set_text(saved.get("model_path") or "")
+    download_check.set_active(bool(saved.get("download_if_missing")))
+    max_spin.set_value(int(saved.get("max_side") or 1024))
+    shift_spin.set_value(int(saved.get("stereo_max_shift") or 24))
+    output_combo.set_active_id(saved.get("stereo_output") or "side_by_side")
+
+    config.set_property("variant", variant_combo.get_active_id() or "vits")
+    config.set_property("model_path", model_entry.get_text())
+    config.set_property("download_if_missing", download_check.get_active())
+    config.set_property("max_side", max_spin.get_value_as_int())
+    config.set_property("max_shift", shift_spin.get_value_as_int())
+    config.set_property("stereo_output",
+                        output_combo.get_active_id() or "side_by_side")
+
+    dialog.show_all()
+    response = dialog.run()
+    dialog.destroy()
+    display = Gdk.Display.get_default()
+    if display is not None:
+        display.flush()
+    if response != Gtk.ResponseType.OK:
+        return False
+
+    # Persist the last-used settings alongside the existing configuration.
+    persist = load_saved()
+    persist.update({
+        "variant": config.get_property("variant"),
+        "model_path": config.get_property("model_path").strip(),
+        "download_if_missing": bool(config.get_property("download_if_missing")),
+        "max_side": int(config.get_property("max_side")),
+        "stereo_max_shift": int(config.get_property("max_shift")),
+        "stereo_output": config.get_property("stereo_output"),
+    })
+    save_config(persist)
+    return True
+
+
+def stereo_func(procedure, run_mode, image, drawables, config, data):
+    if run_mode == Gimp.RunMode.INTERACTIVE:
+        GimpUi.init(PLUGIN_NAME)
+        if not stereo_dialog(config):
+            return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+    if not drawables:
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
+                                           GLib.Error(_("No drawable provided.")))
+
+    Gimp.context_push()
+
+    out_paths = []
+    try:
+        from PIL import Image as PILImage
+        depth, _colored, pil_color, _model = estimate_depth_for_layer(
+            image, drawables[0],
+            config.get_property("variant"),
+            config.get_property("model_path").strip(),
+            config.get_property("download_if_missing"),
+            config.get_property("max_side"))
+
+        max_shift = config.get_property("max_shift")
+        output_mode = config.get_property("stereo_output")
+
+        Gimp.progress_set_text(_("Rendering stereo views..."))
+        Gimp.progress_pulse()
+        temp_dir = Path(tempfile.gettempdir())
+        if output_mode in ("side_by_side", "both"):
+            left, right = dibr.make_stereo(pil_color,
+                                           PILImage.fromarray(depth),
+                                           base=float(max_shift))
+            combo = PILImage.new("RGB", (left.width + right.width, left.height))
+            combo.paste(left, (0, 0))
+            combo.paste(right, (left.width, 0))
+            sbs_path = temp_dir / f"gimp_depthmap_sbs_{os.getpid()}.png"
+            combo.save(str(sbs_path), "PNG")
+            out_paths.append((sbs_path, _("Stereo (left | right)")))
+        if output_mode in ("anaglyph", "both"):
+            anaglyph_pil = dibr.make_anaglyph_pil(
+                pil_color, PILImage.fromarray(depth), base=float(max_shift))
+            anag_path = temp_dir / f"gimp_depthmap_anaglyph_{os.getpid()}.png"
+            anaglyph_pil.save(str(anag_path), "PNG")
+            out_paths.append((anag_path, _("Anaglyph")))
+
+        Gimp.progress_set_text(_("Opening combined view in a new tab..."))
+        Gimp.progress_pulse()
+        for path, layer_name in out_paths:
+            new_image = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE,
+                                       Gio.File.new_for_path(str(path)))
+            if not new_image:
+                continue
+            layers = new_image.get_layers()
+            if layers:
+                layers[0].set_name(layer_name)
+            Gimp.Display.new(new_image)
+    except Exception as e:
+        Gimp.message(_("An unexpected error occurred: %s") % e)
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR,
+                                           GLib.Error(str(e)))
+    finally:
+        for p, _name in out_paths:
+            if p.exists():
+                os.remove(p)
+        Gimp.context_pop()
+
+    return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
+
+def create_stereo_procedure(plugin, name):
+    """Build and return the Stereo Views ImageProcedure."""
+    procedure = Gimp.ImageProcedure.new(plugin, name,
+                                        Gimp.PDBProcType.PLUGIN,
+                                        stereo_func, None)
+    procedure.set_image_types("RGB*, GRAY*")
+    procedure.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE |
+                                   Gimp.ProcedureSensitivityMask.DRAWABLES)
+    procedure.set_documentation(
+        _("Stereo Views"),
+        _("Renders left and right eye views of the scene from its estimated "
+          "depth (depth-image-based rendering)."),
+        name,
+    )
+    procedure.set_menu_label(_("Stereo _Views..."))
+    procedure.set_attribution("Hugging Face (Depth Anything V2)",
+                              "Plugin Author",
+                              "2026")
+    procedure.add_menu_path("<Image>/Filters/AI/")
+
+    # Depth Anything V2 variant
+    variant_choice = Gimp.Choice.new()
+    for i, key in enumerate(MODEL_CONFIGS):
+        variant_choice.add(key, i, key, VARIANT_LABELS[key])
+    procedure.add_choice_argument(
+        "variant", _("Depth Anything V2 _Variant"), _("Depth Anything V2 model size"),
+        variant_choice, "vits", GObject.ParamFlags.READWRITE,
+    )
+
+    # Optional explicit checkpoint path
+    procedure.add_string_argument(
+        "model_path", _("_Model file"),
+        _("Optional path to a .pth checkpoint (overrides discovery)"),
+        "", GObject.ParamFlags.READWRITE,
+    )
+
+    # Auto-download toggle
+    procedure.add_boolean_argument(
+        "download_if_missing", _("_Download if missing"),
+        _("Fetch the checkpoint from Hugging Face when not found on disk"),
+        True, GObject.ParamFlags.READWRITE,
+    )
+
+    # Inference resolution
+    procedure.add_int_argument(
+        "max_side", _("_Max side (px)"),
+        _("Larger side of the inference resolution; higher = better detail, slower"),
+        256, 4096, 1024, GObject.ParamFlags.READWRITE,
+    )
+
+    # Maximum parallax
+    procedure.add_int_argument(
+        "max_shift", _("_Parallax (px)"),
+        _("Maximum horizontal shift between the eyes; larger = stronger 3D"),
+        0, 512, 24, GObject.ParamFlags.READWRITE,
+    )
+
+    # Output mode
+    output_choice = Gimp.Choice.new()
+    output_choice.add("side_by_side", 0, "side_by_side",
+                      _("Side-by-side (new tab)"))
+    output_choice.add("anaglyph", 1, "anaglyph", _("Red-cyan anaglyph (new tab)"))
+    output_choice.add("both", 2, "both", _("Both (new tabs)"))
+    procedure.add_choice_argument(
+        "stereo_output", _("_Create"),
+        _("Which combined result to open in a new tab"),
+        output_choice, "side_by_side", GObject.ParamFlags.READWRITE,
+    )
+
+    return procedure
 
 
 class DepthMap (Gimp.PlugIn):
@@ -751,10 +1052,12 @@ class DepthMap (Gimp.PlugIn):
         return True, PLUGIN_NAME, None
 
     def do_query_procedures(self):
-        return ['python-fu-depthmap']
+        return ['python-fu-depthmap', 'python-fu-depthmap-stereo']
 
     def do_create_procedure(self, name):
         Gegl.init(None)
+        if name == 'python-fu-depthmap-stereo':
+            return create_stereo_procedure(self, name)
         procedure = Gimp.ImageProcedure.new(self, name,
                                             Gimp.PDBProcType.PLUGIN,
                                             depthmap_func, None)
