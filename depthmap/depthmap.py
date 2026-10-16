@@ -92,15 +92,14 @@ def variant_from_path(name):
 
 
 def cache_dir():
-    """Directory used for auto-downloaded checkpoints. Overridable via the
-    GIMP_DEPTHMAP_CACHE environment variable, else XDG cache dir."""
+    """Directory used for auto-downloaded checkpoints. Defaults to the
+    Hugging Face cache (honoring HF_HOME / HF_HUB_CACHE); overridable via the
+    GIMP_DEPTHMAP_CACHE environment variable."""
+    from huggingface_hub.constants import HF_HUB_CACHE
     env = os.environ.get('GIMP_DEPTHMAP_CACHE')
     if env:
         return Path(env)
-    base = os.environ.get('XDG_CACHE_HOME')
-    if base:
-        return Path(base) / 'gimp-depthmap'
-    return Path.home() / '.cache' / 'gimp-depthmap'
+    return Path(HF_HUB_CACHE)
 
 
 CONFIG_DIR = Path(os.path.join(os.environ.get('HOME', str(Path.home())),
@@ -156,7 +155,9 @@ def _candidate_dirs():
         dirs = [home / 'models', home / 'Downloads',
                 home / 'Downloads' / 'src' / 'ComfyUI' / 'models',
                 Path('/opt/models')]
-    dirs.append(cache_dir())
+    # Legacy cache from before this plugin switched to the Hugging Face cache;
+    # plain .pth files here are still found by the scan below.
+    dirs.append(home / '.cache' / 'gimp-depthmap')
     return dirs
 
 
@@ -175,6 +176,23 @@ def _locate_matches():
         return []
 
 
+def _hf_cache_matches(cache):
+    """Yield depth-anything checkpoints already cached by huggingface_hub.
+    Targets the depth-anything repo folders instead of walking the whole HF
+    cache, which can hold many unrelated models."""
+    for repo in ('Depth-Anything-V2-Small', 'Depth-Anything-V2-Base',
+                 'Depth-Anything-V2-Large'):
+        snapshots = (cache / ('models--depth-anything--%s' % repo)) / 'snapshots'
+        if not snapshots.is_dir():
+            continue
+        for revision in snapshots.iterdir():
+            if not revision.is_dir():
+                continue
+            for p in revision.glob('depth_anything_v2_vit*.pth'):
+                if p.is_file():
+                    yield p
+
+
 def find_depth_models(extra_dirs=None):
     """Find Depth Anything V2 checkpoints on disk. Returns
     {variant: [sorted Paths]}. V1 checkpoints are excluded by the pattern.
@@ -185,6 +203,8 @@ def find_depth_models(extra_dirs=None):
     paths = set()
     for line in _locate_matches():
         paths.add(Path(line))
+    for p in _hf_cache_matches(cache_dir()):
+        paths.add(p)
     for d in (extra_dirs if extra_dirs is not None else _candidate_dirs()):
         try:
             for p in d.rglob('depth_anything_v2_vit*.pth'):
@@ -209,32 +229,68 @@ def download_url(variant):
 
 
 def download_model(variant, dest_dir, progress=None):
-    """Download a checkpoint into dest_dir (idempotent). Returns the file path."""
-    import ssl
-    import urllib.request
+    """Fetch a Depth Anything V2 checkpoint through huggingface_hub into the
+    HF cache under dest_dir (idempotent and resumable). Returns the local
+    file path. `progress` is an optional callable(fraction)."""
+    try:
+        import requests
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.file_download import repo_folder_name
+    except ImportError:
+        raise RuntimeError(
+            _("Missing dependency: huggingface_hub. Install with: "
+              "pip install huggingface_hub"))
     dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / CHECKPOINTS[variant]
-    if dest.is_file() and dest.stat().st_size > 0:
-        return dest
-    url = download_url(variant)
-    request = urllib.request.Request(url, headers={'User-Agent': 'gimp-depthmap/1.0'})
-    context = ssl.create_default_context()
-    with urllib.request.urlopen(request, context=context, timeout=60) as resp, \
-            open(dest, 'wb') as out:
-        total = int(resp.headers.get('Content-Length') or 0)
-        read = 0
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-            read += len(chunk)
-            if progress and total:
-                progress(min(1.0, read / float(total)))
-    if progress:
-        progress(1.0)
-    return dest
+    repo = HF_REPOS[variant]
+    filename = CHECKPOINTS[variant]
+
+    # Total size for the percentage shown while downloading; 0 when the HEAD
+    # request fails and percentage progress is skipped.
+    total = 0
+    try:
+        head = requests.head(download_url(variant), allow_redirects=True,
+                             timeout=30)
+        total = int(head.headers.get('Content-Length') or 0)
+    except Exception:
+        total = 0
+
+    outcome = {}
+
+    def _run():
+        try:
+            outcome['path'] = hf_hub_download(
+                repo_id=repo, filename=filename, cache_dir=str(dest_dir))
+        except Exception as e:
+            outcome['error'] = e
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+
+    # hf_hub_download streams into <cache>/models--<repo>/blobs/*.incomplete;
+    # poll its size from this (GIMP) thread and report the fraction done.
+    blobs = dest_dir / repo_folder_name(repo_id=repo,
+                                        repo_type='model') / 'blobs'
+    seen = -1
+    while worker.is_alive():
+        got = 0
+        if blobs.is_dir():
+            try:
+                for partial in blobs.glob('*.incomplete'):
+                    try:
+                        got = max(got, partial.stat().st_size)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        if got != seen:
+            seen = got
+            if progress and total > 0 and got > 0:
+                progress(min(1.0, got / float(total)))
+        worker.join(timeout=0.1)
+    worker.join()
+    if 'error' in outcome:
+        raise outcome['error']
+    return outcome['path']
 
 
 def _require_deps():

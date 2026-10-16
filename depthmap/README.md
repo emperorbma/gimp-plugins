@@ -12,8 +12,9 @@ running in-process (the `upscale.py` pattern).
    both), and a max side resolution
 4. Click OK — the plugin finds an existing `depth_anything_v2_vit*.pth`
    checkpoint (via `locate` and common model directories), or downloads the
-   chosen variant into `~/.cache/gimp-depthmap/`, then adds the depth map as a
-   new layer above the current layer
+   chosen variant into the Hugging Face cache
+   (`~/.cache/huggingface/hub`, honoring `HF_HOME`) via `huggingface_hub`,
+   then adds the depth map as a new layer above the current layer
 
 ## 3D photo export (Facebook)
 
@@ -32,15 +33,15 @@ the grayscale depth map even when the on-canvas output is set to colored.
 ## Dependencies
 
 ```shell
-pip install --no-deps depth-anything-v2 torch pillow
+pip install --no-deps depth-anything-v2 torch pillow huggingface_hub
 pip install opencv-python matplotlib   # only if not already installed
 ```
 
 `depth-anything-v2` pulls in `einops`, `numpy`, and `opencv-python`. Install
 with `--no-deps` when your torch/torchvision is newer than the package's pinned
 combination (it pins `torchvision<0.23`, which conflicts with recent torch
-releases); the plugin needs `torch`, `torchvision`, `cv2`, and `matplotlib` at
-runtime.
+releases); the plugin needs `torch`, `torchvision`, `cv2`, `matplotlib`, and
+`huggingface_hub` (for downloading checkpoints) at runtime.
 
 ## Checkpoints
 
@@ -48,7 +49,9 @@ The plugin discovers `depth_anything_v2_vits.pth` / `_vitb.pth` / `_vitl.pth`
 (a.k.a. Small ~98 MB, Base ~390 MB, Large ~1.3 GB) in:
 
 - `~/models`, `~/Downloads`, `~/Downloads/src/ComfyUI/models`, `/opt/models`
-- `~/.cache/gimp-depthmap/` (its own download cache)
+- the Hugging Face cache (`~/.cache/huggingface/hub`, honoring `HF_HOME`),
+  where the plugin downloads checkpoints via `huggingface_hub`
+- `~/.cache/gimp-depthmap/` (legacy cache from earlier plugin versions)
 - Any path returned by `locate -r 'depth_anything_v2_vit[bsl]\.pth'`
 
 Explicit paths entered in the dialog always win. Depth Anything V1 checkpoints
@@ -56,8 +59,7 @@ Explicit paths entered in the dialog always win. Depth Anything V1 checkpoints
 manually, use the Hugging Face CLI, e.g.:
 
 ```shell
-hf download depth-anything/Depth-Anything-V2-Small \
-  --local-dir ~/.cache/gimp-depthmap
+hf download depth-anything/Depth-Anything-V2-Small
 ```
 
 ## Menu
