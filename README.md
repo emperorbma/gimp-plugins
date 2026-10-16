@@ -124,7 +124,9 @@ The plugin auto-detects the loaded model and available features via `/sdcpp/v1/c
 
 ![AI Edit in GIMP 3](aiedit/images/gimp-plugins-multi-layer.webp)
 
-**Multi-layer edit (object & style transfer).** With a reference-capable model (Qwen Image 2.1, Kontext, Boogu, Z-Image), tick **Multi-layer edit** in the dialog to send individual layers to the server as separate reference images. Each checked layer is labeled positionally (`image 1`, `image 2`, ...) in layer-stack order (topmost = `image 1`); the layer being edited is always included. Rename your layers so you can identify them in the list, then refer to them by number in the prompt:
+**Multi-layer edit (object & style transfer).** Operates on layers of an image. First, put the reference images into layers. To open an image as a layer in GIMP, go to File > Open as layers… from the top menu or press Ctrl + Alt + O on your keyboard. Or paste from other tabs. For best results, scale layers so they are the same size on the long dimension, and a multiple of 32. Either 1024 or 512 for fast processing. Depending on the system, larger images produce better quality but may take a long time to edit, or run out of memory. Experiment.
+
+With a reference-capable model (Qwen Image 2.1, Kontext, Boogu, Z-Image), tick **Multi-layer edit** in the dialog to send layers to the server as separate reference images. Each checked layer is labeled positionally (`image 1`, `image 2`, ...) in layer-stack order (topmost = `image 1`); the layer being edited is always included. Rename layers (F2) to identify them in the list, then refer to them by number in the prompt:
 
 - **Object transfer:** check the couch layer and the room layer, then prompt `Put the couch in image 1 into the room in image 2.`
 - **Style transfer:** check the style source and the target, then prompt `Render image 2 in the style of image 1.`
