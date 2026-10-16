@@ -202,6 +202,7 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 "prediction": "",
                 "edit-mode": default_mode,
                 "use-selection": True,
+                "diffusion-fa": True,
                 "seed": -1,
                 "strength": 0.9,
                 "prompt": "",
@@ -390,6 +391,22 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
         grid.attach(use_selection_check, 0, row, 2, 1)
         row += 1
 
+        diffusion_fa_check = Gtk.CheckButton.new_with_mnemonic(
+            _("Diffusion _flash attention"))
+        diffusion_fa_check.set_active(bool(config.get_property("diffusion-fa")))
+        diffusion_fa_check.set_tooltip_text(
+            _("Pass --diffusion-fa. Turn off when sampling loses the Vulkan device."))
+        diffusion_fa_check.set_hexpand(True)
+        diffusion_fa_check.set_halign(Gtk.Align.START)
+        widgets["diffusion-fa"] = diffusion_fa_check
+
+        def on_diffusion_fa_toggled(cb):
+            config.set_property("diffusion-fa", cb.get_active())
+
+        diffusion_fa_check.connect("toggled", on_diffusion_fa_toggled)
+        grid.attach(diffusion_fa_check, 0, row, 2, 1)
+        row += 1
+
         add_combined_row([
             (_("_Seed:"), "seed", "int", -1, -1, 2147483647,
              _("Random seed (-1 for random) — use the same seed to reproduce results")),
@@ -455,6 +472,11 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                             config.set_property(key, int(value))
                         elif prop.value_type == GObject.TYPE_DOUBLE:
                             config.set_property(key, float(value))
+                        elif prop.value_type == GObject.TYPE_BOOLEAN:
+                            if isinstance(value, bool):
+                                config.set_property(key, value)
+                            else:
+                                config.set_property(key, str(value).lower() in ("1", "true", "yes", "on"))
                         else:
                             config.set_property(key, str(value))
                     except (ValueError, TypeError):
@@ -794,8 +816,9 @@ def aiedit_func(procedure, run_mode, image, drawables, config, data):
                 command.extend(["--init-img", str(input_path)])
             command.extend(["--mask", str(mask_path)])
 
+        if config.get_property("diffusion-fa"):
+            command.append("--diffusion-fa")
         command.extend([
-            "--diffusion-fa",
             "-v",
             "--offload-to-cpu",
             "-o", str(output_path),
@@ -1005,6 +1028,11 @@ class AIEdit(Gimp.PlugIn):
         # Use selection as inpaint mask
         procedure.add_boolean_argument(
             "use-selection", _("Use _selection as mask"), _("Limit the edit to the current selection (inpaint)"),
+            True, GObject.ParamFlags.READWRITE,
+        )
+        procedure.add_boolean_argument(
+            "diffusion-fa", _("Diffusion _flash attention"),
+            _("Pass --diffusion-fa. Turn off when sampling loses the Vulkan device."),
             True, GObject.ParamFlags.READWRITE,
         )
         # Seed

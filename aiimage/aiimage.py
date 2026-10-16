@@ -124,6 +124,7 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                 "sigmas": DEFAULT_SIGMAS,
                 "vae-format": "auto",
                 "prediction": "",
+                "diffusion-fa": True,
                 "prompt": "",
             }
 
@@ -266,6 +267,22 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         add_file_row(_("_Prediction:"), "prediction", "",
                      _("Override the model's prediction type (eps, v, sd3_flow, flux_flow); leave blank to auto-detect."))
 
+        diffusion_fa_check = Gtk.CheckButton.new_with_mnemonic(
+            _("Diffusion _flash attention"))
+        diffusion_fa_check.set_active(bool(config.get_property("diffusion-fa")))
+        diffusion_fa_check.set_tooltip_text(
+            _("Pass --diffusion-fa. Turn off when sampling loses the Vulkan device."))
+        diffusion_fa_check.set_hexpand(True)
+        diffusion_fa_check.set_halign(Gtk.Align.START)
+        widgets["diffusion-fa"] = diffusion_fa_check
+
+        def on_diffusion_fa_toggled(cb):
+            config.set_property("diffusion-fa", cb.get_active())
+
+        diffusion_fa_check.connect("toggled", on_diffusion_fa_toggled)
+        grid.attach(diffusion_fa_check, 0, row, 2, 1)
+        row += 1
+
         # Prompt: multi-line text view
         prompt_label = Gtk.Label.new_with_mnemonic(_("_Prompt:"))
         prompt_label.set_halign(Gtk.Align.START)
@@ -324,6 +341,11 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                             config.set_property(key, int(value))
                         elif prop.value_type == GObject.TYPE_DOUBLE:
                             config.set_property(key, float(value))
+                        elif prop.value_type == GObject.TYPE_BOOLEAN:
+                            if isinstance(value, bool):
+                                config.set_property(key, value)
+                            else:
+                                config.set_property(key, str(value).lower() in ("1", "true", "yes", "on"))
                         else:
                             config.set_property(key, str(value))
                     except (ValueError, TypeError):
@@ -341,6 +363,11 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                         buf = widget.get_buffer()
                         text = str(value)
                         buf.set_text(text, len(text))
+                    elif isinstance(widget, Gtk.CheckButton):
+                        if isinstance(value, bool):
+                            widget.set_active(value)
+                        else:
+                            widget.set_active(str(value).lower() in ("1", "true", "yes", "on"))
                 except (ValueError, TypeError):
                     pass
             # Clear widgets not in the preset
@@ -358,6 +385,12 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                             widget.set_value(0)
                     elif isinstance(widget, Gtk.TextView):
                         widget.get_buffer().set_text("", 0)
+                    elif isinstance(widget, Gtk.CheckButton):
+                        prop = procedure.find_property(key)
+                        if prop:
+                            widget.set_active(bool(prop.default_value))
+                        else:
+                            widget.set_active(False)
                 except (ValueError, TypeError):
                     pass
 
@@ -388,6 +421,8 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
                     elif isinstance(widget, Gtk.TextView):
                         buf = widget.get_buffer()
                         values[key] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+                    elif isinstance(widget, Gtk.CheckButton):
+                        values[key] = widget.get_active()
                 except (ValueError, TypeError):
                     pass
             return values
@@ -566,8 +601,9 @@ def aiimage_func(procedure, run_mode, image, drawables, config, data):
         add_flag("--t5", config.get_property("t5"))
         add_flag("--lora", config.get_property("lora"))
 
+        if config.get_property("diffusion-fa"):
+            command.append("--diffusion-fa")
         command.extend([
-            "--diffusion-fa",
             "-v",
             "--offload-to-cpu",
             "--width", str(config.get_property("width")),
@@ -753,6 +789,11 @@ class AIImage(Gimp.PlugIn):
         procedure.add_string_argument(
             "prediction", _("_Prediction"), _("Prediction type: eps, v, sd3_flow, flux_flow, etc."),
             "", GObject.ParamFlags.READWRITE,
+        )
+        procedure.add_boolean_argument(
+            "diffusion-fa", _("Diffusion _flash attention"),
+            _("Pass --diffusion-fa. Turn off when sampling loses the Vulkan device."),
+            True, GObject.ParamFlags.READWRITE,
         )
         # Prompt
         procedure.add_string_argument(
