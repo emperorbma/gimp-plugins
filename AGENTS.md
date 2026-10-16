@@ -188,6 +188,13 @@ output_path = temp_dir / f"gimp_<name>_output_{os.getpid()}.png"
   use `stereo_`-prefixed keys for stereo-only settings.
 - `estimate_depth_for_layer()` exports → resolves model → infers → returns
   `(depth, colored, pil_image, model_path)`; both handlers use it.
+- Model resolution is entirely `huggingface_hub`-driven (no dialog path
+  field, no manual config): `resolve_model()` checks the HF cache
+  (`try_to_load_from_cache`) first, then scans disk
+  (`find_depth_models()`); any matching checkpoint found on disk is
+  **silently adopted into the HF cache** (`_adopt_into_hf_cache()`, hardlinked
+  in place where possible) so the hub manages it from then on, and only
+  downloads if nothing else matched.
 - `dibr.py` is pure numpy + PIL (backward-mapping would smear depth edges, so it
   forward-maps with a z-buffer, then directionally fills disocclusion holes).
 

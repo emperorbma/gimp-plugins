@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import json
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -108,18 +109,15 @@ CONFIG_FILE = CONFIG_DIR / 'config.json'
 
 
 def load_saved():
-    """Load previously saved dialog settings and discovered checkpoint
-    paths. Returns a dict that is always missing at least the keys it does
-    not know about."""
+    """Load previously saved dialog settings. Returns a dict that is always
+    missing at least the keys it does not know about."""
     default = {
         "variant": "vits",
-        "model_path": "",
         "download_if_missing": True,
         "output": "grayscale",
         "max_side": 1024,
         "invert": False,
         "export_3d": False,
-        "discovered": {},
     }
     try:
         with open(CONFIG_FILE, 'r') as f:
@@ -130,13 +128,11 @@ def load_saved():
         return default
     merged = dict(default)
     merged.update({k: v for k, v in data.items() if k in default})
-    if not isinstance(merged["discovered"], dict):
-        merged["discovered"] = {}
     return merged
 
 
 def save_config(cfg):
-    """Persist dialog settings and discovered model paths to disk."""
+    """Persist dialog settings to disk."""
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
@@ -163,7 +159,6 @@ def _candidate_dirs():
 
 def _locate_matches():
     """Best-effort `locate` lookup; returns [] when locate is missing/fails."""
-    import shutil
     import subprocess
     if not shutil.which('locate'):
         return []
@@ -447,18 +442,65 @@ def export_3d_chooser():
     return result
 
 
-def resolve_model(variant, explicit, download, cache, progress=None):
-    """Explicit path > discovered checkpoint > download. Raises RuntimeError
-    with a helpful message when nothing resolves. `progress` is an optional
-    callable(fraction) forwarded to download_model while downloading."""
-    if explicit:
-        p = Path(explicit)
-        if not p.is_file():
-            raise RuntimeError(_("Model file not found: %s") % explicit)
-        return p
+def _try_hf_cache(variant, cache):
+    """Look up the checkpoint in the huggingface_hub-managed cache; returns
+    a Path when found, else None."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return None
+    cached = try_to_load_from_cache(
+        repo_id=HF_REPOS[variant], filename=CHECKPOINTS[variant],
+        cache_dir=str(cache))
+    if isinstance(cached, str) and Path(cached).is_file():
+        return Path(cached)
+    return None
+
+
+def _adopt_into_hf_cache(src, variant, cache):
+    """Silently register a locally-found checkpoint into the huggingface_hub
+    cache so the hub manages it from now on (the equivalent of caching the
+    model in place). Returns the hub-managed path, or the original path when
+    adoption is unnecessary or fails."""
+    try:
+        from huggingface_hub.file_download import repo_folder_name
+    except ImportError:
+        return Path(src)
+    cache = Path(cache)
+    repo_dir = cache / repo_folder_name(repo_id=HF_REPOS[variant],
+                                        repo_type='model')
+    src = Path(src)
+    try:
+        if repo_dir.resolve() in src.resolve().parents:
+            return src  # already inside the HF cache
+    except OSError:
+        return src
+    snapshots = repo_dir / 'snapshots' / 'main'
+    dest = snapshots / CHECKPOINTS[variant]
+    if dest.is_file() or dest.resolve() == src.resolve():
+        return dest
+    try:
+        snapshots.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(src, dest)  # keep the data where it already lives
+        except OSError:
+            shutil.copy2(src, dest)
+        return dest
+    except OSError:
+        return src
+
+
+def resolve_model(variant, download, cache, progress=None):
+    """HF cache > discovered checkpoint (adopted into the HF cache) >
+    download. Raises RuntimeError with a helpful message when nothing
+    resolves. `progress` is an optional callable(fraction) forwarded to
+    download_model while downloading."""
+    managed = _try_hf_cache(variant, cache)
+    if managed:
+        return managed
     found = find_depth_models()
     if found.get(variant):
-        return found[variant][0]
+        return _adopt_into_hf_cache(found[variant][0], variant, cache)
     if download:
         try:
             return download_model(variant, cache, progress=progress)
@@ -467,7 +509,8 @@ def resolve_model(variant, explicit, download, cache, progress=None):
                 _("Failed to download %s from %s into %s: %s")
                 % (CHECKPOINTS[variant], download_url(variant), cache, e))
     raise RuntimeError(
-        _("No %s checkpoint found. Enable download or set the model file path.") % CHECKPOINTS[variant])
+        _("No %s checkpoint found. Enable download to fetch it from "
+          "Hugging Face.") % CHECKPOINTS[variant])
 
 
 def make_depth_layer(image, drawable, png_path, layer_name):
@@ -491,13 +534,12 @@ def make_depth_layer(image, drawable, png_path, layer_name):
 
 
 def depthmap_dialog(config):
-    """Custom dialog for depth map options. Loads last-used settings and any
-    previously discovered checkpoint paths so it opens instantly; starts a
-    background `locate` search (with a spinner) only when a variant has no
-    cached path. Writes the chosen values into `config` and persists them.
-    Returns True when accepted."""
+    """Custom dialog for depth map options. Loads last-used settings so it
+    opens instantly; the checkpoint itself is resolved at run time from the
+    Hugging Face cache (auto-adopting any model found on disk, or
+    downloading it). Writes the chosen values into `config` and persists
+    them. Returns True when accepted."""
     saved = load_saved()
-    discovered = {k: list(v) for k, v in saved.get("discovered", {}).items()}
 
     dialog = Gtk.Dialog(title=_("Depth Map"), transient_for=None)
     dialog.add_buttons(_("_Cancel"), Gtk.ResponseType.CANCEL,
@@ -520,82 +562,12 @@ def depthmap_dialog(config):
     for key in MODEL_CONFIGS:
         variant_combo.append(key, VARIANT_LABELS[key])
 
-    model_entry = Gtk.Entry()
-
-    # Spinner + label shown while a background discovery runs.
-    search_spinner = Gtk.Spinner()
-    search_spinner.set_size_request(16, 16)
-    search_label = Gtk.Label()
-    search_label.set_halign(Gtk.Align.START)
-
-    # Discovery is run once in a worker thread and merged into `discovered`.
-    # A second search is only started when the user picks a variant with no
-    # cached or already-found path.
-    search_lock = threading.Lock()
-    set_searching = lambda active, msg="": ( \
-        (search_label.set_text(msg), search_spinner.start(), search_spinner.show(), search_label.show()) \
-        if active else (search_spinner.stop(), search_spinner.hide(), search_label.hide()))
-
-    def refresh_field(variant):
-        matches = discovered.get(variant) or []
-        if matches:
-            model_entry.set_text(str(matches[0]))
-
-    def merge_find(result):
-        for v in MODEL_CONFIGS:
-            hits = result.get(v)
-            if hits and not discovered.get(v):
-                discovered[v] = [str(p) for p in hits]
-        # Done: hide the spinner and refill the current variant's field if it
-        # now has a path but the entry is still empty.
-        set_searching(False)
-        variant_t = variant_combo.get_active_id() or "vits"
-        if not model_entry.get_text().strip():
-            refresh_field(variant_t)
-        return False
-
-    def start_search():
-        """Run discovery in a worker thread; keep any fresh results cached."""
-        if not search_lock.acquire(blocking=False):
-            return
-        set_searching(True, _("Searching for models..."))
-
-        def worker():
-            try:
-                result = find_depth_models()
-            finally:
-                search_lock.release()
-            GLib.idle_add(merge_find, result)
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def on_variant_changed(cb):
-        variant = cb.get_active_id() or "vits"
-        config.set_property("variant", variant)
-        if discovered.get(variant) or model_entry.get_text().strip():
-            refresh_field(variant)
-        else:
-            # Nothing cached for this variant: look for it in the background.
-            model_entry.set_text("")
-            start_search()
+        config.set_property("variant", cb.get_active_id() or "vits")
 
     variant_combo.connect("changed", on_variant_changed)
     grid.attach(variant_label, 0, row, 1, 1)
     grid.attach(variant_combo, 1, row, 1, 1)
-    grid.attach(search_spinner, 2, row, 1, 1)
-    grid.attach(search_label, 3, row, 1, 1)
-    row += 1
-
-    # Model file (auto-filled by variant; editable as an override)
-    model_label = Gtk.Label.new_with_mnemonic(_("_Model file:"))
-    model_label.set_halign(Gtk.Align.START)
-
-    def on_model_changed(entry):
-        config.set_property("model_path", entry.get_text())
-
-    model_entry.connect("changed", on_model_changed)
-    grid.attach(model_label, 0, row, 1, 1)
-    grid.attach(model_entry, 1, row, 1, 1)
     row += 1
 
     # Download if missing
@@ -659,10 +631,8 @@ def depthmap_dialog(config):
     grid.attach(export_check, 1, row, 1, 1)
     row += 1
 
-    # Initialize widgets from saved settings. Setting the active variant
-    # fires on_variant_changed and helps fill the model path field.
+    # Initialize widgets from saved settings.
     variant_combo.set_active_id(saved.get("variant") or "vits")
-    model_entry.set_text(saved.get("model_path") or "")
     download_check.set_active(bool(saved.get("download_if_missing")))
     output_combo.set_active_id(saved.get("output") or "grayscale")
     max_spin.set_value(int(saved.get("max_side") or 1024))
@@ -671,17 +641,11 @@ def depthmap_dialog(config):
 
     # Reflect saved settings into config so OK can rely on config alone.
     config.set_property("variant", variant_combo.get_active_id() or "vits")
-    config.set_property("model_path", model_entry.get_text())
     config.set_property("download_if_missing", download_check.get_active())
     config.set_property("output", output_combo.get_active_id() or "grayscale")
     config.set_property("max_side", max_spin.get_value_as_int())
     config.set_property("invert", invert_check.get_active())
     config.set_property("export_3d", export_check.get_active())
-
-    # Kick off a search only when the persisted variant has no cached path.
-    variant_now = variant_combo.get_active_id() or "vits"
-    if not discovered.get(variant_now) and not model_entry.get_text().strip():
-        start_search()
 
     dialog.show_all()
     response = dialog.run()
@@ -692,22 +656,19 @@ def depthmap_dialog(config):
     if response != Gtk.ResponseType.OK:
         return False
 
-    # Persist the last-used settings and the merged discovery cache.
+    # Persist the last-used settings.
     persist = {
         "variant": config.get_property("variant"),
-        "model_path": config.get_property("model_path").strip(),
         "download_if_missing": bool(config.get_property("download_if_missing")),
         "output": config.get_property("output"),
         "max_side": int(config.get_property("max_side")),
         "invert": bool(config.get_property("invert")),
         "export_3d": bool(config.get_property("export_3d")),
-        "discovered": discovered,
     }
     save_config(persist)
     return True
 
-def estimate_depth_for_layer(image, drawable, variant, explicit, do_download,
-                             max_side):
+def estimate_depth_for_layer(image, drawable, variant, do_download, max_side):
     """Export `drawable` to a temp PNG, resolve the model, run depth
     estimation, and return (depth, colored, pil_image, model_path). The
     temp input file is cleaned up before returning. Progress is reported
@@ -722,7 +683,7 @@ def estimate_depth_for_layer(image, drawable, variant, explicit, do_download,
         Gimp.progress_set_text(_("Resolving depth model..."))
         Gimp.progress_pulse()
         model_path = resolve_model(
-            variant, explicit, do_download, cache_dir(),
+            variant, do_download, cache_dir(),
             progress=lambda frac: Gimp.progress_set_text(
                 _("Downloading %s (%d%%)...") % (CHECKPOINTS[variant], int(frac * 100))))
 
@@ -776,7 +737,6 @@ def depthmap_func(procedure, run_mode, image, drawables, config, data):
         depth, colored, _pil, _model = estimate_depth_for_layer(
             image, drawables[0],
             config.get_property("variant"),
-            config.get_property("model_path").strip(),
             config.get_property("download_if_missing"),
             config.get_property("max_side"))
 
@@ -854,19 +814,6 @@ def stereo_dialog(config):
     grid.attach(variant_combo, 1, row, 1, 1)
     row += 1
 
-    # Model file (optional override)
-    model_label = Gtk.Label.new_with_mnemonic(_("_Model file:"))
-    model_label.set_halign(Gtk.Align.START)
-    model_entry = Gtk.Entry()
-
-    def on_model_changed(entry):
-        config.set_property("model_path", entry.get_text())
-
-    model_entry.connect("changed", on_model_changed)
-    grid.attach(model_label, 0, row, 1, 1)
-    grid.attach(model_entry, 1, row, 1, 1)
-    row += 1
-
     # Download if missing
     download_check = Gtk.CheckButton.new_with_mnemonic(_("_Download if missing"))
 
@@ -924,14 +871,12 @@ def stereo_dialog(config):
 
     # Initialize widgets from saved settings, then mirror into config.
     variant_combo.set_active_id(saved.get("variant") or "vits")
-    model_entry.set_text(saved.get("model_path") or "")
     download_check.set_active(bool(saved.get("download_if_missing")))
     max_spin.set_value(int(saved.get("max_side") or 1024))
     shift_spin.set_value(int(saved.get("stereo_max_shift") or 24))
     output_combo.set_active_id(saved.get("stereo_output") or "side_by_side")
 
     config.set_property("variant", variant_combo.get_active_id() or "vits")
-    config.set_property("model_path", model_entry.get_text())
     config.set_property("download_if_missing", download_check.get_active())
     config.set_property("max_side", max_spin.get_value_as_int())
     config.set_property("max_shift", shift_spin.get_value_as_int())
@@ -951,7 +896,6 @@ def stereo_dialog(config):
     persist = load_saved()
     persist.update({
         "variant": config.get_property("variant"),
-        "model_path": config.get_property("model_path").strip(),
         "download_if_missing": bool(config.get_property("download_if_missing")),
         "max_side": int(config.get_property("max_side")),
         "stereo_max_shift": int(config.get_property("max_shift")),
@@ -979,7 +923,6 @@ def stereo_func(procedure, run_mode, image, drawables, config, data):
         depth, _colored, pil_color, _model = estimate_depth_for_layer(
             image, drawables[0],
             config.get_property("variant"),
-            config.get_property("model_path").strip(),
             config.get_property("download_if_missing"),
             config.get_property("max_side"))
 
@@ -1058,13 +1001,6 @@ def create_stereo_procedure(plugin, name):
         variant_choice, "vits", GObject.ParamFlags.READWRITE,
     )
 
-    # Optional explicit checkpoint path
-    procedure.add_string_argument(
-        "model_path", _("_Model file"),
-        _("Optional path to a .pth checkpoint (overrides discovery)"),
-        "", GObject.ParamFlags.READWRITE,
-    )
-
     # Auto-download toggle
     procedure.add_boolean_argument(
         "download_if_missing", _("_Download if missing"),
@@ -1138,13 +1074,6 @@ class DepthMap (Gimp.PlugIn):
         procedure.add_choice_argument(
             "variant", _("Depth Anything V2 _Variant"), _("Depth Anything V2 model size"),
             variant_choice, "vits", GObject.ParamFlags.READWRITE,
-        )
-
-        # Optional explicit checkpoint path
-        procedure.add_string_argument(
-            "model_path", _("_Model file"),
-            _("Optional path to a .pth checkpoint (overrides discovery)"),
-            "", GObject.ParamFlags.READWRITE,
         )
 
         # Auto-download toggle
