@@ -9,14 +9,14 @@ A collection of Python-based AI plugins for **GIMP 3** (GNU Image Manipulation P
 | Plugin | What it does | How it works | Dependencies |
 |--------|-------------|--------------|--------------|
 | **Background Remove** (`bgremove/`) | Removes backgrounds from images using AI | Exports layer → runs `backgroundremover` CLI → imports result as new transparent layer | `backgroundremover` (PyPI) |
-| **AI Upscale** (`upscale/`) | Upscales images 4× using AI upscalers | Exports layer → runs PyTorch upscaler (3 backends) → imports result as new upscaled layer | `torch`, `pillow`, `image_gen_aux` / `diffusers` |
-| **Depth Map** (`depthmap/`) | Creates a depth map layer from the active layer | Exports layer → runs Depth Anything V2 in-process (Small / Base / Large) → imports result as new depth layer; optional Facebook 3D photo export | `depth-anything-v2`, `torch`, `torchvision`, `opencv-python`, `matplotlib` |
+| **AI Upscale** (`upscale/`) | Upscales images 2x/4× using AI upscalers | Exports layer → runs PyTorch upscaler (3 backends) → imports result as new upscaled layer | `torch`, `pillow`, `image_gen_aux` / `diffusers` |
+| **Depth Map** (`depthmap/`) | Creates a depth map layer or Stereo 3D photos (L-R/Cyan-Magenta/Facebook 3D) from the active layer | Exports layer → runs Depth Anything V2 in-process (Small / Base / Large) → imports result as new depth layer; optional Facebook 3D photo export | `depth-anything-v2`, `torch`, `torchvision`, `opencv-python`, `matplotlib` |
 | **AI Edit** (`aiedit/`) | Edits images using text prompts via a diffusion model and vision LLM | Exports layer → runs `sd-cli` with a diffusion GGUF model + vision LLM → imports edited result as new layer | `sd-cli` (stable-diffusion.cpp), diffusion GGUF, vision LLM GGUF, VAE |
-| **SD Server** (`sd-server/`) | Generates/edits images via stable-diffusion.cpp server API | Connects to `sd-server` HTTP API; supports txt2img, img2img, and Kontext/Boogu-style reference editing | `sd-server` (stable-diffusion.cpp), `requests` |
+| **SD Server** (`sd-server/`) | Generates/edits images via stable-diffusion.cpp server API | Connects to `sd-server` HTTP API; supports txt2img, img2img, and Kontext/Boogu/Qwen-style reference editing | `sd-server` (stable-diffusion.cpp), `requests` |
 
 ## Security
 
-**Arbitrary command execution.** Plugins for most applications can run any commands. This is not new. Open source relies on the community to find and fix bugs and exploits. You should always review new source code or test in a sandbox.
+**Arbitrary command execution.** Plugins for most applications can run any commands. This is not new. Open source relies on the community to find and fix bugs and exploits. You should always review new source code or test in a secure environment. Read our repo notes on [why a sandbox is not secure](https://github.com/themanyone/sbx).
 
 Don't download from untrusted places. The official location for these plugins is https://github.com/themanyone/gimp-plugins
 
@@ -68,7 +68,7 @@ pip install opencv-python matplotlib  # only if not already installed
 
 ### 2. Place plugins in GIMP's plug-ins directory
 
-The installer looks for the highest-numbered GIMP/xx.x/plug-ins directory. Install whichever plugins you need. If you have `sd-server` running, you might be able to get by with just `bgremove`, `depthmap`, and `sd-server` plugins. With Qwen Image 2.1 (default), and careful prompting, `sd-server` can do it all, removing backgrounds, & making depth maps, but it's slower & experimental. Not likely to be supported.
+The installer looks for the highest-numbered GIMP/xx.x/plug-ins directory. Install whichever plugins you need. If you have `sd-server` running, you might be able to get by with just `bgremove`, `depthmap`, and `sd-server` plugins. With Qwen Image 2.1 (default), and careful prompting, `sd-server` can technically do it all, removing backgrounds, color separations, halftones, sharpening photos that have been scaled-up the old way & making depth maps/3D photos, but it's slower & experimental. Not likely to be supported.
 
 ```shell
 git clone https://github.com/themanyone/gimp-plugins.git
@@ -83,7 +83,7 @@ ln -srf sd-server ~/.config/GIMP/3.2/plug-ins/
 Every plugin follows the same pattern:
 
 ```
-export layer as temp PNG → process (CLI or ML) → load result → new layer → copy pixels
+export layer as temp PNG → process (CLI or ML) → load result → new layer
 ```
 
 See [AGENTS.md](AGENTS.md) for the full architecture guide and development notes.
@@ -96,7 +96,7 @@ The SD Server plugin connects to a running `sd-server` instance from [stable-dif
 - **img2img** — edit the current layer using a diffusion model
 - **Reference-based editing** — Qwen Image 2.1, Kontext, Boogu, Z-Image models (uses `extra_images` for reference conditioning)
 
-Start the server first, then use the plugin from GIMP:
+Start the server first [read their docs for more info](https://github.com/leejet/stable-diffusion.cpp/tree/master/docs), then use these plugins from GIMP:
 
 ```bash
 # Qwen Image 2.1 Turbo with the Qwen3-VL 8B vision LLM (same files as AI Edit below)
@@ -110,7 +110,7 @@ sd-server \
 
 Swap in any other diffusion model, VAE and text encoder.
 
-The plugin auto-detects the loaded model and available features via `/sdcpp/v1/capabilities`. The model name is shown in the dialog.
+The plugin auto-detects the served model and available features via `/sdcpp/v1/capabilities`. The model name is shown in the dialog.
 
 **API Compatibility.** Works with many servers that implement the stable-diffusion API:
 
@@ -124,7 +124,7 @@ The plugin auto-detects the loaded model and available features via `/sdcpp/v1/c
 
 ![AI Edit in GIMP 3](aiedit/images/gimp-plugins-multi-layer.webp)
 
-**Multi-layer edit (object & style transfer).** Operates on layers of an image. First, put the reference images into layers. To open an image as a layer in GIMP, go to File > Open as layers… from the top menu or press Ctrl + Alt + O on your keyboard. Or paste from other tabs. For best results, scale layers so they are the same size on the long dimension, and a multiple of 32. Either 1024 or 512 for fast processing. Depending on the system, larger images produce better quality but may take a long time to edit, or run out of memory. Experiment.
+**Multi-layer edit (object & style transfer).** Operates on layers of an image. First, load reference images as layers. To open an image as a layer in GIMP, go to File > Open as layers… from the top menu or press Ctrl + Alt + O on your keyboard. Or paste selections from other tabs. For best results, scale layers so they are the same size on the long dimension, and a multiple of 32. Either 1024 or 512 for fast processing. Depending on the system, larger images produce better quality but may take a long time to edit, or run out of memory. Experiment.
 
 With a reference-capable model (Qwen Image 2.1, Kontext, Boogu, Z-Image), tick **Multi-layer edit** in the dialog to send layers to the server as separate reference images. Each checked layer is labeled positionally (`image 1`, `image 2`, ...) in layer-stack order (topmost = `image 1`); the layer being edited is always included. Rename layers (F2) to identify them in the list, then refer to them by number in the prompt:
 
@@ -137,12 +137,12 @@ Placing objects needs near-full **Init Strength** and **Guidance above 1.0**, so
 ### Background Remove
 
 - This works with existing tools.
-- Let's assume you have installed `backgroundremover`.
+- It assumes you have installed `backgroundremover`.
 
 Don't want to use `backgroundremover`?
 - Install any old command-line AI tool to remove backgrounds from images.
 - You can use `pip install rembg` for example.
-- Edit `bgremove/bgremove.py` and modify the `command` list to use a different CLI tool (e.g., `rembg` instead of `backgroundremover`).
+- Edit `bgremove/bgremove.py` and modify the `command` list to use your favorite CLI tool (e.g., `rembg` instead of `backgroundremover`).
 
 ### AI Upscale
 
@@ -158,11 +158,15 @@ It is not necessary to edit `upscale/upscale.py` to:
 
 ### Depth Map
 
-The Depth Map plugin creates a depth map layer (white = near, black = far) from the active layer using [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), running in-process like `upscale`. Find it under Filters -> AI.
+The Depth Map plugin creates a depth map layer (white = near, black = far) (or the reverse of that) from the active layer using [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), running in-process like `upscale`. Find it under Filters -> AI.
 
 **Requirements.** `pip install --no-deps depth-anything-v2 torch pillow huggingface_hub` plus `opencv-python` and `matplotlib`. Install with `--no-deps` because the package pins an old `torchvision` combo. A checkpoint (`depth_anything_v2_vit[sbl].pth`) is also needed; the Small (~98 MB), Base (~390 MB), and Large (~1.3 GB) variants match three model sizes, with the model cache avoiding reloads between runs. GPU (CUDA) is used when available, with a CPU fallback.
 
-**It works automatically.** Just pick a variant and output (grayscale, colored inferno, or both) in the dialog and click OK. The plugin locates an existing checkpoint via `locate` and common model directories (`~/models`, `~/Downloads`, `~/Downloads/src/ComfyUI/models`, `/opt/models`), or auto-downloads the chosen variant into the Hugging Face cache (`~/.cache/huggingface/hub`, honoring `HF_HOME`) via `huggingface_hub`. It resolves a usable model in this order: explicit path in the dialog → discovered checkpoint on disk → download. Alternatively, tick **Export as 3D photo (Facebook)** to also write `<name>.jpg` plus `<name>_depth.jpg` for upload to Facebook.
+**Model download location.** Our plugins may attempt to automatically download AI models. Newer apps let [Huggingface Hub](https://huggingface.co/docs/huggingface_hub/en/installation) manage model storage in a standard way. Our plugin finds models in the Hugging Face cache (`~/.cache/huggingface/hub`, honoring `HF_HOME`) via `huggingface_hub`. If you have already downloaded models manually, or through outdated apps, our plugin will automatically find them & [tell huggingface_hub where they are](https://themanyone.blogspot.com/2026/10/centralize-download-location-of-ai.html), so apps like ours won't re-download them yet again in the future.
+
+Simply pick a model (small, base, or large) and output mode (grayscale, colored inferno, or both) in the dialog and click OK.
+
+Alternatively, tick **Export as 3D photo (Facebook)** to also write `<name>.jpg` plus `<name>_depth.jpg` for upload to Facebook.
 
 **Depth of field (Lens Blur).** To simulate depth of field, Duplicate your image layer (Ctrl-D), putting it on a new tab. Then generate an inverted-grayscale depth map (black = near, white = far), with **Invert (for lens blur)** ticked. Switch tabs back to the original image & run Filters → Blur → Lens Blur, choosing the depth map as the "aux" layer (set the Radius higher, e.g. 5) so the far background blurs while the near subject stays sharp. If the blur lands on the wrong parts of the image, use Colors -> Curves or Burn tool on the Depth Map tab, to blacken the area(s) to be focused. See [GIMP Lens Blur example](https://www.youtube.com/watch?v=Ia2VUby_CDI).
 
