@@ -46,7 +46,9 @@ releases); the plugin needs `torch`, `torchvision`, `cv2`, `matplotlib`, and
 
 The plugin locates `depth_anything_v2_vits.pth` / `_vitb.pth` / `_vitl.pth`
 (a.k.a. Small ~98 MB, Base ~390 MB, Large ~1.3 GB) entirely through
-`huggingface_hub`. It resolves a checkpoint in this order:
+`huggingface_hub`, using the shared `hfhub.py` module (repo root; copied
+beside installed plugins by `install.py`). It resolves a checkpoint in this
+order:
 
 1. **The Hugging Face cache** (`~/.cache/huggingface/hub`, honoring
    `HF_HOME`), where the plugin downloads checkpoints via `huggingface_hub`

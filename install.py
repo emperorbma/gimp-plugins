@@ -723,6 +723,16 @@ def copy_plugin(src: Path, dst_dir: Path, dry_run: bool = False) -> bool:
                 shutil.copytree(src_locale, dst_locale)
             except OSError as e:
                 _log_warn(f"Could not copy locale directory: {e}")
+        # Copy the shared huggingface_hub helper so plugins that import it
+        # can find it even when installed by copy (symlinked installs resolve
+        # to the repo root instead).
+        src_hfhub = PLUGINS_DIR / "hfhub.py"
+        dst_hfhub = dst / "hfhub.py"
+        if src_hfhub.is_file() and not dst_hfhub.exists():
+            try:
+                shutil.copy2(src_hfhub, dst_hfhub)
+            except OSError as e:
+                _log_warn(f"Could not copy shared hfhub.py: {e}")
         _log_ok(src.name)
         return True
     except OSError as e:

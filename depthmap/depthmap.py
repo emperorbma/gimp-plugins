@@ -20,7 +20,6 @@ import sys
 import json
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 import locale
 import gettext
@@ -43,6 +42,19 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import dibr
+
+# Shared huggingface_hub helpers live at the repo root; they are found when
+# running from a checkout or a symlinked install, or copied beside the
+# plugin by install.py.
+try:
+    import hfhub
+except ImportError:
+    _here = os.path.dirname(os.path.realpath(__file__))
+    _repo_root = os.path.dirname(_here)
+    for _candidate in (_here, _repo_root):
+        if _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+    import hfhub
 
 PLUGIN_NAME = "python-fu-depthmap"
 LOCALE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'locale'))
@@ -96,11 +108,7 @@ def cache_dir():
     """Directory used for auto-downloaded checkpoints. Defaults to the
     Hugging Face cache (honoring HF_HOME / HF_HUB_CACHE); overridable via the
     GIMP_DEPTHMAP_CACHE environment variable."""
-    from huggingface_hub.constants import HF_HUB_CACHE
-    env = os.environ.get('GIMP_DEPTHMAP_CACHE')
-    if env:
-        return Path(env)
-    return Path(HF_HUB_CACHE)
+    return hfhub.hub_cache_dir(os.environ.get('GIMP_DEPTHMAP_CACHE'))
 
 
 CONFIG_DIR = Path(os.path.join(os.environ.get('HOME', str(Path.home())),
@@ -216,76 +224,6 @@ def find_depth_models(extra_dirs=None):
                 continue
             found[v].append(p)
     return found
-
-
-def download_url(variant):
-    return ("https://huggingface.co/%s/resolve/main/%s"
-            % (HF_REPOS[variant], CHECKPOINTS[variant]))
-
-
-def download_model(variant, dest_dir, progress=None):
-    """Fetch a Depth Anything V2 checkpoint through huggingface_hub into the
-    HF cache under dest_dir (idempotent and resumable). Returns the local
-    file path. `progress` is an optional callable(fraction)."""
-    try:
-        import requests
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.file_download import repo_folder_name
-    except ImportError:
-        raise RuntimeError(
-            _("Missing dependency: huggingface_hub. Install with: "
-              "pip install huggingface_hub"))
-    dest_dir = Path(dest_dir)
-    repo = HF_REPOS[variant]
-    filename = CHECKPOINTS[variant]
-
-    # Total size for the percentage shown while downloading; 0 when the HEAD
-    # request fails and percentage progress is skipped.
-    total = 0
-    try:
-        head = requests.head(download_url(variant), allow_redirects=True,
-                             timeout=30)
-        total = int(head.headers.get('Content-Length') or 0)
-    except Exception:
-        total = 0
-
-    outcome = {}
-
-    def _run():
-        try:
-            outcome['path'] = hf_hub_download(
-                repo_id=repo, filename=filename, cache_dir=str(dest_dir))
-        except Exception as e:
-            outcome['error'] = e
-
-    worker = threading.Thread(target=_run, daemon=True)
-    worker.start()
-
-    # hf_hub_download streams into <cache>/models--<repo>/blobs/*.incomplete;
-    # poll its size from this (GIMP) thread and report the fraction done.
-    blobs = dest_dir / repo_folder_name(repo_id=repo,
-                                        repo_type='model') / 'blobs'
-    seen = -1
-    while worker.is_alive():
-        got = 0
-        if blobs.is_dir():
-            try:
-                for partial in blobs.glob('*.incomplete'):
-                    try:
-                        got = max(got, partial.stat().st_size)
-                    except OSError:
-                        pass
-            except OSError:
-                pass
-        if got != seen:
-            seen = got
-            if progress and total > 0 and got > 0:
-                progress(min(1.0, got / float(total)))
-        worker.join(timeout=0.1)
-    worker.join()
-    if 'error' in outcome:
-        raise outcome['error']
-    return outcome['path']
 
 
 def _require_deps():
@@ -442,75 +380,26 @@ def export_3d_chooser():
     return result
 
 
-def _try_hf_cache(variant, cache):
-    """Look up the checkpoint in the huggingface_hub-managed cache; returns
-    a Path when found, else None."""
-    try:
-        from huggingface_hub import try_to_load_from_cache
-    except ImportError:
-        return None
-    cached = try_to_load_from_cache(
-        repo_id=HF_REPOS[variant], filename=CHECKPOINTS[variant],
-        cache_dir=str(cache))
-    if isinstance(cached, str) and Path(cached).is_file():
-        return Path(cached)
-    return None
-
-
-def _adopt_into_hf_cache(src, variant, cache):
-    """Silently register a locally-found checkpoint into the huggingface_hub
-    cache so the hub manages it from now on (the equivalent of caching the
-    model in place). Returns the hub-managed path, or the original path when
-    adoption is unnecessary or fails."""
-    try:
-        from huggingface_hub.file_download import repo_folder_name
-    except ImportError:
-        return Path(src)
-    cache = Path(cache)
-    repo_dir = cache / repo_folder_name(repo_id=HF_REPOS[variant],
-                                        repo_type='model')
-    src = Path(src)
-    try:
-        if repo_dir.resolve() in src.resolve().parents:
-            return src  # already inside the HF cache
-    except OSError:
-        return src
-    snapshots = repo_dir / 'snapshots' / 'main'
-    dest = snapshots / CHECKPOINTS[variant]
-    if dest.is_file() or dest.resolve() == src.resolve():
-        return dest
-    try:
-        snapshots.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(src, dest)  # keep the data where it already lives
-        except OSError:
-            shutil.copy2(src, dest)
-        return dest
-    except OSError:
-        return src
-
-
 def resolve_model(variant, download, cache, progress=None):
-    """HF cache > discovered checkpoint (adopted into the HF cache) >
-    download. Raises RuntimeError with a helpful message when nothing
-    resolves. `progress` is an optional callable(fraction) forwarded to
-    download_model while downloading."""
-    managed = _try_hf_cache(variant, cache)
-    if managed:
-        return managed
+    """Resolve the checkpoint for `variant` through hfhub (HF cache >
+    discovered checkpoint, adopted into the HF cache > download). `cache`
+    is the Hugging Face cache dir; `progress` is an optional
+    callable(fraction) forwarded while downloading. Raises RuntimeError with
+    a helpful message when nothing resolves."""
+    return hfhub.resolve_model(
+        HF_REPOS[variant], CHECKPOINTS[variant], cache=cache,
+        download=download, progress=progress, local_search=_local_match)
+
+
+def _local_match(repo_id, filename):
+    """Disk-search callback for hfhub.resolve_model: return the first
+    locally-found Depth Anything V2 checkpoint for `filename`, or None."""
+    variant = variant_from_path(filename)
+    if not variant:
+        return None
     found = find_depth_models()
-    if found.get(variant):
-        return _adopt_into_hf_cache(found[variant][0], variant, cache)
-    if download:
-        try:
-            return download_model(variant, cache, progress=progress)
-        except Exception as e:
-            raise RuntimeError(
-                _("Failed to download %s from %s into %s: %s")
-                % (CHECKPOINTS[variant], download_url(variant), cache, e))
-    raise RuntimeError(
-        _("No %s checkpoint found. Enable download to fetch it from "
-          "Hugging Face.") % CHECKPOINTS[variant])
+    hits = found.get(variant) or []
+    return hits[0] if hits else None
 
 
 def make_depth_layer(image, drawable, png_path, layer_name):

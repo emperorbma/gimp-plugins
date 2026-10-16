@@ -86,7 +86,10 @@ Every plugin follows the same pattern:
 export layer as temp PNG → process (CLI or ML) → load result → new layer
 ```
 
-See [AGENTS.md](AGENTS.md) for the full architecture guide and development notes.
+**Shared `hfhub.py`** (repo root): reusable `huggingface_hub` helpers for any
+plugin that needs to locate/download model checkpoints — `resolve_model()`
+checks the HF cache, adopts local disk models into it, then downloads. See
+[AGENTS.md](AGENTS.md) for the full architecture guide and development notes.
 
 ### SD Server
 

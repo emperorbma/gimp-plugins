@@ -189,12 +189,17 @@ output_path = temp_dir / f"gimp_<name>_output_{os.getpid()}.png"
 - `estimate_depth_for_layer()` exports → resolves model → infers → returns
   `(depth, colored, pil_image, model_path)`; both handlers use it.
 - Model resolution is entirely `huggingface_hub`-driven (no dialog path
-  field, no manual config): `resolve_model()` checks the HF cache
-  (`try_to_load_from_cache`) first, then scans disk
-  (`find_depth_models()`); any matching checkpoint found on disk is
-  **silently adopted into the HF cache** (`_adopt_into_hf_cache()`, hardlinked
-  in place where possible) so the hub manages it from then on, and only
-  downloads if nothing else matched.
+  field, no manual config) and lives in the **shared `hfhub.py` module at the
+  repo root**, reusable by any plugin. `hfhub.resolve_model()` checks the HF
+  cache (`try_to_load_from_cache`) first, then calls a plugin-supplied disk
+  search callback (`local_search`); any matching checkpoint found on disk is
+  **silently adopted into the HF cache** (`adopt_into_cache()`, hardlinked in
+  place where possible) so the hub manages it from then on, and only
+  downloads if nothing else matched. `hfhub.download_file()` runs
+  `hf_hub_download` in a worker thread with progress polling. depthmap wires
+  its `find_depth_models()` disk scan as the `local_search` callback.
+- `install.py` copies the shared `hfhub.py` beside each copied plugin so
+  plugins find it regardless of symlink vs. copy install.
 - `dibr.py` is pure numpy + PIL (backward-mapping would smear depth edges, so it
   forward-maps with a z-buffer, then directionally fills disocclusion holes).
 
